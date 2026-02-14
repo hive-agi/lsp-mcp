@@ -1,0 +1,5 @@
+{:project-id "lsp-mcp"
+ :parent "hive"
+ :description "LSP integration for MCP protocol"
+ :language :clojure
+ :tags ["lsp" "mcp"]}
