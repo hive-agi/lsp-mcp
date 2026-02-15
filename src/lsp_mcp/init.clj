@@ -51,10 +51,71 @@
             {:success? true :already-initialized? true}
             (do
               (reset! state {:initialized? true})
+              ;; Contribute commands to composite "analysis" tool
+              (when-let [contribute! (try-resolve 'hive-mcp.extensions.registry/contribute-commands!)]
+                (contribute! "analysis" :lsp
+                             {"definitions" {:handler #(tools/handle-lsp (assoc % :command "definitions"))
+                                             :params {"project_root" {:type "string" :description "Path to the project root directory"}
+                                                      "namespace" {:type "string" :description "Filter by namespace (e.g., my.app.core)"}}
+                                             :description "List var definitions in project/namespace"}
+                              "references"  {:handler #(tools/handle-lsp (assoc % :command "references"))
+                                             :params {"project_root" {:type "string" :description "Path to the project root directory"}
+                                                      "function" {:type "string" :description "Filter by function name"}
+                                                      "namespace" {:type "string" :description "Filter by namespace"}}
+                                             :description "Find references to a function"}
+                              "ns-graph"    {:handler #(tools/handle-lsp (assoc % :command "ns-graph"))
+                                             :params {"project_root" {:type "string" :description "Path to the project root directory"}}
+                                             :description "Namespace dependency graph (LSP-based)"}
+                              "sync"        {:handler #(tools/handle-lsp (assoc % :command "sync"))
+                                             :params {"project_root" {:type "string" :description "Path to the project root directory"}
+                                                      "project_id" {:type "string" :description "Project identifier for KG sync"}
+                                                      "scope" {:type "string" :description "Scope for KG sync operations"}}
+                                             :description "Sync analysis results to Knowledge Graph"}
+                              "status"      {:handler #(tools/handle-lsp (assoc % :command "status"))
+                                             :params {}
+                                             :description "Check LSP bridge and cache status"}
+                              ;; Live LSP bridge commands (backend-agnostic)
+                              "hover"       {:handler #(tools/handle-lsp (assoc % :command "hover"))
+                                             :params {"project_root" {:type "string" :description "Path to the project root directory"}
+                                                      "file_path" {:type "string" :description "Path to file"}
+                                                      "line" {:type "integer" :description "0-based line number"}
+                                                      "column" {:type "integer" :description "0-based column number"}}
+                                             :description "Hover info at position (docstring, type)"}
+                              "definition"  {:handler #(tools/handle-lsp (assoc % :command "definition"))
+                                             :params {"project_root" {:type "string" :description "Path to the project root directory"}
+                                                      "file_path" {:type "string" :description "Path to file"}
+                                                      "line" {:type "integer" :description "0-based line number"}
+                                                      "column" {:type "integer" :description "0-based column number"}}
+                                             :description "Go to definition at position"}
+                              "live-references" {:handler #(tools/handle-lsp (assoc % :command "live-references"))
+                                                 :params {"project_root" {:type "string" :description "Path to the project root directory"}
+                                                          "file_path" {:type "string" :description "Path to file"}
+                                                          "line" {:type "integer" :description "0-based line number"}
+                                                          "column" {:type "integer" :description "0-based column number"}}
+                                                 :description "Find all references at position (live)"}
+                              "symbols"     {:handler #(tools/handle-lsp (assoc % :command "symbols"))
+                                             :params {"project_root" {:type "string" :description "Path to the project root directory"}
+                                                      "file_path" {:type "string" :description "Path to file"}}
+                                             :description "Document symbols for file"}
+                              "cursor-info" {:handler #(tools/handle-lsp (assoc % :command "cursor-info"))
+                                             :params {"project_root" {:type "string" :description "Path to the project root directory"}
+                                                      "file_path" {:type "string" :description "Path to file"}
+                                                      "line" {:type "integer" :description "0-based line number"}
+                                                      "column" {:type "integer" :description "0-based column number"}}
+                                             :description "Cursor info at position (clojure-lsp cursorInfo)"}
+                              "server-info" {:handler #(tools/handle-lsp (assoc % :command "server-info"))
+                                             :params {"project_root" {:type "string" :description "Path to the project root directory"}}
+                                             :description "LSP server info for project"}
+                              "workspaces"  {:handler #(tools/handle-lsp (assoc % :command "workspaces"))
+                                             :params {}
+                                             :description "List active LSP workspaces"}
+                              "bridge-status" {:handler #(tools/handle-lsp (assoc % :command "bridge-status"))
+                                               :params {}
+                                               :description "Check live LSP bridge availability"}}))
               (log/info "lsp-mcp addon initialized")
               {:success? true
                :errors []
-               :metadata {:tools 1
+               :metadata {:tools 0
                           :cache-status (cache/cache-status)}})))
 
         (shutdown! [_]
@@ -64,7 +125,8 @@
           nil)
 
         (tools [_]
-          [(assoc (tools/tool-def) :handler tools/handle-lsp)])
+          ;; Commands contributed to composite "analysis" tool, no standalone tool
+          [])
 
         (schema-extensions [_] {})
 

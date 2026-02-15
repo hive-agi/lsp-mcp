@@ -1,13 +1,16 @@
 (ns lsp-mcp.tools
   "MCP tool handlers for LSP analysis.
 
-   Uses Docker sidecar cache (via lsp-mcp.cache) for fast reads.
-   Falls back to in-process clojure-lsp when cache unavailable.
+   Three strategies:
+   1. Docker sidecar cache (via lsp-mcp.cache) — fast reads
+   2. In-process clojure-lsp — fallback when cache unavailable
+   3. Live Emacs LSP bridge (via lsp-mcp.emacs-bridge) — real-time queries
 
    Request-level memoization: multiple commands in quick succession
    (e.g., definitions then calls) share the same analysis result
    via a 30-second TTL cache keyed by project_root."
-  (:require [lsp-mcp.core :as core]
+  (:require [lsp-mcp.bridge :as bridge]
+            [lsp-mcp.core :as core]
             [lsp-mcp.cache :as cache]
             [lsp-mcp.analysis :as analysis]
             [lsp-mcp.log :as log]))
@@ -48,6 +51,28 @@
   "Clear the analysis cache. Useful for testing or after known mutations."
   []
   (reset! analysis-cache nil))
+
+;; =============================================================================
+;; Bridge Resolution (lazy — Emacs backend is optional)
+;; =============================================================================
+
+(defonce ^:private bridge-instance
+  (delay
+    (try
+      (when-let [make-fn (requiring-resolve 'lsp-mcp.emacs-bridge/make-emacs-bridge)]
+        (let [b (make-fn)]
+          (when (bridge/bridge-available? b)
+            (log/info "Emacs LSP bridge available")
+            b)))
+      (catch Exception e
+        (log/debug "Emacs bridge not available:" (.getMessage e))
+        nil))))
+
+(defn- resolve-bridge
+  "Get the active ILspBridge instance, or return {:error ...}."
+  []
+  (or @bridge-instance
+      {:error "Emacs LSP bridge not available"}))
 
 ;; =============================================================================
 ;; Command Handlers
@@ -103,7 +128,32 @@
                                   {:file      (:file c)
                                    :row       (:row c)
                                    :caller-ns (:caller-ns c)
-                                   :caller-fn (:caller-fn c)})))))})
+                                   :caller-fn (:caller-fn c)})))))
+   ;; Strategy 3: Live LSP bridge commands (via ILspBridge protocol — backend-agnostic)
+   "bridge-status"     (fn [_]
+                         (when-let [b (resolve-bridge)]
+                           (bridge/bridge-status b)))
+   "workspaces"        (fn [_]
+                         (when-let [b (resolve-bridge)]
+                           (bridge/bridge-workspaces b)))
+   "hover"             (fn [{:keys [project_root file_path line column]}]
+                         (when-let [b (resolve-bridge)]
+                           (bridge/bridge-hover b project_root file_path line column)))
+   "definition"        (fn [{:keys [project_root file_path line column]}]
+                         (when-let [b (resolve-bridge)]
+                           (bridge/bridge-definition b project_root file_path line column)))
+   "live-references"   (fn [{:keys [project_root file_path line column]}]
+                         (when-let [b (resolve-bridge)]
+                           (bridge/bridge-references b project_root file_path line column)))
+   "symbols"           (fn [{:keys [project_root file_path]}]
+                         (when-let [b (resolve-bridge)]
+                           (bridge/bridge-document-symbols b project_root file_path)))
+   "cursor-info"       (fn [{:keys [project_root file_path line column]}]
+                         (when-let [b (resolve-bridge)]
+                           (bridge/bridge-cursor-info b project_root file_path line column)))
+   "server-info"       (fn [{:keys [project_root]}]
+                         (when-let [b (resolve-bridge)]
+                           (bridge/bridge-server-info b project_root)))})
 
 ;; =============================================================================
 ;; MCP Interface
@@ -132,7 +182,10 @@
   "MCP tool definition for the LSP tool."
   []
   {:name        "lsp"
-   :description "Clojure LSP analysis and KG sync tools"
+   :description (str "Clojure LSP analysis and KG sync tools. "
+                     "Static analysis: analyze, definitions, calls, ns-graph, callers, references, sync, status. "
+                     "Live LSP bridge: bridge-status, hover, definition, live-references, "
+                     "symbols, cursor-info, server-info, workspaces.")
    :inputSchema {:type       "object"
                  :properties {:command      {:type "string"
                                              :enum (sort (keys command-handlers))}
@@ -145,5 +198,11 @@
                               :namespace    {:type        "string"
                                              :description "Filter by namespace (e.g., my.app.core)"}
                               :function     {:type        "string"
-                                             :description "Filter by function name"}}
+                                             :description "Filter by function name"}
+                              :file_path    {:type        "string"
+                                             :description "Path to file (live bridge commands)"}
+                              :line         {:type        "integer"
+                                             :description "0-based line number (live bridge commands)"}
+                              :column       {:type        "integer"
+                                             :description "0-based column number (live bridge commands)"}}
                  :required   ["command"]}})
