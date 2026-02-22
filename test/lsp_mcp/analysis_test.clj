@@ -4,6 +4,27 @@
             [lsp-mcp.cache :as cache]))
 
 ;; =============================================================================
+;; analyze-project! — nil guard (DBC precondition)
+;; =============================================================================
+
+(deftest test-analyze-project!-nil-root
+  (testing "nil project-root returns error map (not NPE)"
+    (let [result (analysis/analyze-project! nil)]
+      (is (map? result))
+      (is (string? (:error result)))
+      (is (re-find #"project.root" (:error result)))))
+
+  (testing "blank project-root returns error map"
+    (let [result (analysis/analyze-project! "")]
+      (is (map? result))
+      (is (string? (:error result)))))
+
+  (testing "whitespace-only project-root returns error map"
+    (let [result (analysis/analyze-project! "   ")]
+      (is (map? result))
+      (is (string? (:error result))))))
+
+;; =============================================================================
 ;; Extract — var-definitions
 ;; =============================================================================
 

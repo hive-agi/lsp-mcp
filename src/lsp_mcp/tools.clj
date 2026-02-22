@@ -13,7 +13,8 @@
             [lsp-mcp.core :as core]
             [lsp-mcp.cache :as cache]
             [lsp-mcp.analysis :as analysis]
-            [lsp-mcp.log :as log]))
+            [lsp-mcp.log :as log]
+            [clojure.string :as str]))
 
 ;; =============================================================================
 ;; Request-Level Memoization (30s TTL)
@@ -78,57 +79,72 @@
 ;; Command Handlers
 ;; =============================================================================
 
+(defn- require-project-root
+  "Validate project_root param. Returns nil if valid, error response if invalid."
+  [params]
+  (when (str/blank? (:project_root params))
+    {:content [{:type "text" :text (pr-str {:error   "project_root is required"
+                                            :command (:command params)})}]
+     :isError true}))
+
 (def ^:private command-handlers
-  {"analyze"     (fn [{:keys [project_root]}]
-                   (let [result   (cached-analyze project_root)
-                         vars     (analysis/extract-var-definitions (:analysis result))
-                         ns-graph (analysis/extract-namespace-graph (:dep-graph result))]
-                     {:num-files      (count (:analysis result))
-                      :num-namespaces (count ns-graph)
-                      :num-vars       (count vars)
-                      :cache-status   (cache/cache-status)}))
-   "definitions" (fn [{:keys [project_root namespace]}]
-                   (let [result (cached-analyze project_root)
-                         vars   (analysis/extract-var-definitions (:analysis result))]
-                     (if namespace
-                       (vec (filter #(= (str (:ns %)) namespace) vars))
-                       vars)))
-   "calls"       (fn [{:keys [project_root namespace function]}]
-                   (let [result (cached-analyze project_root)
-                         calls  (analysis/extract-call-graph (:analysis result))]
-                     (cond->> calls
-                       namespace (filter #(= (str (:caller-ns %)) namespace))
-                       function  (filter #(= (str (:caller-fn %)) function))
-                       true      vec)))
-   "ns-graph"    (fn [{:keys [project_root]}]
-                   (let [result (cached-analyze project_root)]
-                     (analysis/extract-namespace-graph (:dep-graph result))))
-   "sync"        (fn [{:keys [project_root project_id scope]}]
-                   (core/analyze-and-sync! project_root project_id scope))
+  {"analyze"     (fn [{:keys [project_root] :as params}]
+                   (or (require-project-root params)
+                       (let [result   (cached-analyze project_root)
+                             vars     (analysis/extract-var-definitions (:analysis result))
+                             ns-graph (analysis/extract-namespace-graph (:dep-graph result))]
+                         {:num-files      (count (:analysis result))
+                          :num-namespaces (count ns-graph)
+                          :num-vars       (count vars)
+                          :cache-status   (cache/cache-status)})))
+   "definitions" (fn [{:keys [project_root] :as params}]
+                   (or (require-project-root params)
+                       (let [result (cached-analyze project_root)
+                             vars   (analysis/extract-var-definitions (:analysis result))]
+                         (if (:namespace params)
+                           (vec (filter #(= (str (:ns %)) (:namespace params)) vars))
+                           vars))))
+   "calls"       (fn [{:keys [project_root namespace function] :as params}]
+                   (or (require-project-root params)
+                       (let [result (cached-analyze project_root)
+                             calls  (analysis/extract-call-graph (:analysis result))]
+                         (cond->> calls
+                           namespace (filter #(= (str (:caller-ns %)) namespace))
+                           function  (filter #(= (str (:caller-fn %)) function))
+                           true      vec))))
+   "ns-graph"    (fn [{:keys [project_root] :as params}]
+                   (or (require-project-root params)
+                       (let [result (cached-analyze project_root)]
+                         (analysis/extract-namespace-graph (:dep-graph result)))))
+   "sync"        (fn [{:keys [project_root project_id scope] :as params}]
+                   (or (require-project-root params)
+                       (core/analyze-and-sync! project_root project_id scope)))
    "status"      (fn [_]
                    {:bridge-available? (some? (try (requiring-resolve 'hive-mcp.knowledge-graph.edges/add-edge!)
                                                    (catch Exception _ nil)))
                     :cache             (cache/cache-status)})
-   "callers"     (fn [{:keys [project_root function namespace]}]
-                   (let [result (cached-analyze project_root)
-                         calls  (analysis/extract-call-graph (:analysis result))]
-                     (->> calls
-                          (filter (fn [c]
-                                    (and (or (nil? function)  (= (str (:callee-fn c)) function))
-                                         (or (nil? namespace) (= (str (:callee-ns c)) namespace)))))
-                          vec)))
-   "references"  (fn [{:keys [project_root function namespace]}]
-                   (let [result (cached-analyze project_root)
-                         calls  (analysis/extract-call-graph (:analysis result))]
-                     (->> calls
-                          (filter (fn [c]
-                                    (and (or (nil? function)  (= (str (:callee-fn c)) function))
-                                         (or (nil? namespace) (= (str (:callee-ns c)) namespace)))))
-                          (mapv (fn [c]
-                                  {:file      (:file c)
-                                   :row       (:row c)
-                                   :caller-ns (:caller-ns c)
-                                   :caller-fn (:caller-fn c)})))))
+   "callers"     (fn [{:keys [project_root function namespace] :as params}]
+                   (or (require-project-root params)
+                       (let [result (cached-analyze project_root)
+                             calls  (analysis/extract-call-graph (:analysis result))]
+                         (->> calls
+                              (filter (fn [c]
+                                        (and (or (nil? function)  (= (str (:callee-fn c)) function))
+                                             (or (nil? namespace) (= (str (:callee-ns c)) namespace)))))
+                              vec))))
+   "references"  (fn [{:keys [project_root function namespace] :as params}]
+                   (or (require-project-root params)
+                       (let [result (cached-analyze project_root)
+                             calls  (analysis/extract-call-graph (:analysis result))]
+                         (->> calls
+                              (filter (fn [c]
+                                        (and (or (nil? function)  (= (str (:callee-fn c)) function))
+                                             (or (nil? namespace) (= (str (:callee-ns c)) namespace)))))
+                              (mapv (fn [c]
+                                      {:file      (:file c)
+                                       :row       (:row c)
+                                       :caller-ns (:caller-ns c)
+                                       :caller-fn (:caller-fn c)}))))))
    ;; Strategy 3: Live LSP bridge commands (via ILspBridge protocol — backend-agnostic)
    "bridge-status"     (fn [_]
                          (when-let [b (resolve-bridge)]
@@ -166,7 +182,9 @@
   (if-let [handler (get command-handlers command)]
     (try
       (let [result (handler params)]
-        {:content [{:type "text" :text (pr-str result)}]})
+        (if (:isError result)
+          result
+          {:content [{:type "text" :text (pr-str result)}]}))
       (catch Exception e
         (log/error e "LSP command failed:" command)
         {:content [{:type "text" :text (pr-str {:error   "Failed to handle command"

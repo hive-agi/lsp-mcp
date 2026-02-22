@@ -205,6 +205,74 @@
       (is (some #{"references"} enum)))))
 
 ;; =============================================================================
+;; Nil project_root validation tests
+;; =============================================================================
+
+(deftest handle-lsp-definitions-nil-project-root-test
+  (testing "definitions without project_root returns error (not NPE)"
+    (let [resp   (tools/handle-lsp {:command "definitions"})
+          result (parse-response resp)]
+      (is (:isError resp))
+      (is (string? (:error result)))
+      (is (re-find #"project_root" (:error result)))))
+
+  (testing "definitions with blank project_root returns error"
+    (let [resp   (tools/handle-lsp {:command "definitions" :project_root ""})
+          result (parse-response resp)]
+      (is (:isError resp))
+      (is (string? (:error result))))))
+
+(deftest handle-lsp-callers-nil-project-root-test
+  (testing "callers without project_root returns error"
+    (let [resp   (tools/handle-lsp {:command "callers"})
+          result (parse-response resp)]
+      (is (:isError resp))
+      (is (string? (:error result)))
+      (is (re-find #"project_root" (:error result))))))
+
+(deftest handle-lsp-callers-no-function-test
+  (testing "callers without function or namespace returns all call edges"
+    (let [result (parse-response (tools/handle-lsp {:command      "callers"
+                                                    :project_root "/test"}))]
+      (is (vector? result))
+      (is (= 1 (count result))))))
+
+(deftest handle-lsp-analyze-nil-project-root-test
+  (testing "analyze without project_root returns error"
+    (let [resp   (tools/handle-lsp {:command "analyze"})
+          result (parse-response resp)]
+      (is (:isError resp))
+      (is (string? (:error result))))))
+
+(deftest handle-lsp-calls-nil-project-root-test
+  (testing "calls without project_root returns error"
+    (let [resp   (tools/handle-lsp {:command "calls"})
+          result (parse-response resp)]
+      (is (:isError resp))
+      (is (string? (:error result))))))
+
+(deftest handle-lsp-ns-graph-nil-project-root-test
+  (testing "ns-graph without project_root returns error"
+    (let [resp   (tools/handle-lsp {:command "ns-graph"})
+          result (parse-response resp)]
+      (is (:isError resp))
+      (is (string? (:error result))))))
+
+(deftest handle-lsp-references-nil-project-root-test
+  (testing "references without project_root returns error"
+    (let [resp   (tools/handle-lsp {:command "references"})
+          result (parse-response resp)]
+      (is (:isError resp))
+      (is (string? (:error result))))))
+
+(deftest handle-lsp-sync-nil-project-root-test
+  (testing "sync without project_root returns error"
+    (let [resp   (tools/handle-lsp {:command "sync"})
+          result (parse-response resp)]
+      (is (:isError resp))
+      (is (string? (:error result))))))
+
+;; =============================================================================
 ;; Memoization tests
 ;; =============================================================================
 

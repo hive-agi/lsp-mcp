@@ -8,6 +8,7 @@
   (:require
    [lsp-mcp.cache :as cache]
    [clojure.java.io :as io]
+   [clojure.string :as str]
    [lsp-mcp.log :as log]))
 
 ;; =============================================================================
@@ -24,30 +25,32 @@
 
    project-root - string path to the project root directory."
   [project-root]
-  (let [project-id (.getName (io/file project-root))]
-    ;; Strategy 1: Cache from Docker sidecar
-    (if-let [cached (cache/read-analysis project-id)]
-      (do
-        (log/info "Using cached analysis for" project-id)
-        cached)
-      ;; Strategy 2: In-process fallback
-      (do
-        (log/info "Cache miss for" project-id ", trying in-process clojure-lsp")
-        (if-let [dump-fn (try (requiring-resolve 'clojure-lsp.api/dump)
-                              (catch Exception _ nil))]
-          (try
-            (let [result (dump-fn
-                          {:project-root (io/file project-root)
-                           :output       {:filter-keys [:analysis :dep-graph]}
-                           :analysis     {:type :project-only}})]
-              (:result result))
-            (catch Exception e
-              (log/error "In-process analysis failed:" (ex-message e))
-              {:error (ex-message e)}))
-          (do
-            (log/warn "No cache and clojure-lsp not on classpath")
-            {:error (str "No analysis available for " project-id
-                         ". Start the LSP sidecar or add clojure-lsp to classpath.")}))))))
+  (if (str/blank? project-root)
+    {:error "project-root is required for analysis"}
+    (let [project-id (.getName (io/file project-root))]
+      ;; Strategy 1: Cache from Docker sidecar
+      (if-let [cached (cache/read-analysis project-id)]
+        (do
+          (log/info "Using cached analysis for" project-id)
+          cached)
+        ;; Strategy 2: In-process fallback
+        (do
+          (log/info "Cache miss for" project-id ", trying in-process clojure-lsp")
+          (if-let [dump-fn (try (requiring-resolve 'clojure-lsp.api/dump)
+                                (catch Exception _ nil))]
+            (try
+              (let [result (dump-fn
+                            {:project-root (io/file project-root)
+                             :output       {:filter-keys [:analysis :dep-graph]}
+                             :analysis     {:type :project-only}})]
+                (:result result))
+              (catch Exception e
+                (log/error "In-process analysis failed:" (ex-message e))
+                {:error (ex-message e)}))
+            (do
+              (log/warn "No cache and clojure-lsp not on classpath")
+              {:error (str "No analysis available for " project-id
+                           ". Start the LSP sidecar or add clojure-lsp to classpath.")})))))))
 
 ;; =============================================================================
 ;; Extraction Helpers
