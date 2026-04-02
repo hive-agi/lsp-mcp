@@ -2,9 +2,9 @@
   "KG bridge — emits LSP analysis results to hive-mcp KG via requiring-resolve.
 
    Resolved symbols (lazy, no compile-time dep on hive-mcp):
-     hive-mcp.chroma/index-memory-entry!     — store memory entry, returns entry-id
-     hive-mcp.chroma/content-hash            — SHA-256 for dedup
-     hive-mcp.chroma/find-duplicate          — idempotent upsert check
+     hive-mcp.vectordb.facade/index-memory-entry!     — store memory entry, returns entry-id
+     hive-mcp.vectordb.facade/content-hash            — SHA-256 for dedup
+     hive-mcp.vectordb.facade/find-duplicate          — idempotent upsert check
      hive-mcp.knowledge-graph.edges/add-edge! — create KG edge, returns edge-id
      hive-mcp.tools.memory.scope/inject-project-scope — add scope tag to tags vec"
   (:require [lsp-mcp.log :as log]))
@@ -27,24 +27,24 @@
 ;; =============================================================================
 
 (defn- add-memory-entry!
-  "Add a memory entry to hive-mcp Chroma via requiring-resolve.
+  "Add a memory entry to hive-mcp via requiring-resolve.
 
-   Uses chroma/index-memory-entry! directly (returns entry-id string).
-   Performs content-hash dedup when chroma/find-duplicate is available.
+   Uses vectordb facade/index-memory-entry! (returns entry-id string).
+   Performs content-hash dedup when facade/find-duplicate is available.
 
    Returns entry-id string or nil on failure."
   [entry project-id]
-  (when-let [index-fn (resolve-fn 'hive-mcp.chroma/index-memory-entry!)]
+  (when-let [index-fn (resolve-fn 'hive-mcp.vectordb.facade/index-memory-entry!)]
     (try
       (let [;; Scope injection — adds 'scope:project:<id>' tag
             inject-fn   (resolve-fn 'hive-mcp.tools.memory.scope/inject-project-scope)
             tags        (cond-> (vec (:tags entry))
                           inject-fn (inject-fn project-id))
             ;; Content-hash for dedup
-            hash-fn     (resolve-fn 'hive-mcp.chroma/content-hash)
+            hash-fn     (resolve-fn 'hive-mcp.vectordb.facade/content-hash)
             c-hash      (when hash-fn (hash-fn (:content entry)))
             ;; Check for existing duplicate
-            dup-fn      (resolve-fn 'hive-mcp.chroma/find-duplicate)
+            dup-fn      (resolve-fn 'hive-mcp.vectordb.facade/find-duplicate)
             existing    (when (and dup-fn c-hash)
                           (dup-fn (:type entry) c-hash :project-id project-id))]
         (if existing
@@ -144,8 +144,8 @@
      :errors  @errors}))
 
 (defn available?
-  "Check if hive-mcp functions are resolvable (Chroma + KG edges)."
+  "Check if hive-mcp functions are resolvable (vectordb + KG edges)."
   []
   (boolean
-   (and (resolve-fn 'hive-mcp.chroma/index-memory-entry!)
+   (and (resolve-fn 'hive-mcp.vectordb.facade/index-memory-entry!)
         (resolve-fn 'hive-mcp.knowledge-graph.edges/add-edge!))))
