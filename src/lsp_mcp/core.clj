@@ -25,6 +25,10 @@
    Pipeline: analyze-project! → extract var-defs/call-graph/ns-graph
              → transform to KG operations → sync to KG via bridge.
 
+   Supports two data formats:
+   1. Pre-extracted (fast): sidecar's extract.bb already extracted var-defs etc.
+   2. Monolithic (slow): raw dump.edn requires in-process extraction.
+
    Returns {:analysis-stats {...} :sync-stats {...}}."
   [project-root project-id scope]
   (log/info "Starting analysis and sync for project-root:" project-root
@@ -33,10 +37,17 @@
         raw         (analyze project-root)
         analysis-ms (/ (- (System/nanoTime) start-time) 1e6)
         _           (log/info "Analysis completed in" analysis-ms "ms")
-        ;; Extract structured data from raw analysis
-        var-defs    (analysis/extract-var-definitions (:analysis raw))
-        call-graph  (analysis/extract-call-graph (:analysis raw))
-        ns-graph    (analysis/extract-namespace-graph (:dep-graph raw))
+        ;; Extract structured data — use pre-extracted if available
+        pre?        (:pre-extracted raw)
+        var-defs    (if pre?
+                      (:var-defs raw)
+                      (analysis/extract-var-definitions (:analysis raw)))
+        call-graph  (if pre?
+                      (:call-graph raw)
+                      (analysis/extract-call-graph (:analysis raw)))
+        ns-graph    (if pre?
+                      (analysis/extract-namespace-graph (:dep-graph raw))
+                      (analysis/extract-namespace-graph (:dep-graph raw)))
         ;; Transform to KG operations
         operations  (transform/analysis->kg-operations project-id
                                                        var-defs
@@ -46,11 +57,13 @@
         sync-start  (System/nanoTime)
         sync-result (bridge/sync-to-kg! project-id operations scope)
         sync-ms     (/ (- (System/nanoTime) sync-start) 1e6)]
-    (log/info "Sync completed in" sync-ms "ms")
-    {:analysis-stats {:time-ms  analysis-ms
-                      :var-defs (count var-defs)
-                      :calls    (count call-graph)
-                      :nses     (count ns-graph)}
+    (log/info "Sync completed in" sync-ms "ms"
+              (when pre? "(pre-extracted fast path)"))
+    {:analysis-stats {:time-ms      analysis-ms
+                      :var-defs     (count var-defs)
+                      :calls        (count call-graph)
+                      :nses         (count ns-graph)
+                      :pre-extracted pre?}
      :sync-stats     {:time-ms sync-ms
                       :result  sync-result}}))
 

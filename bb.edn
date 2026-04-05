@@ -1,5 +1,5 @@
 {:paths ["src"]
- :deps {cheshire/cheshire {:mvn/version "6.1.0"}
+ :deps {cheshire/cheshire {:mvn/version "6.2.0"}
         io.github.hive-agi/modex-bb {:git/tag "v0.1.1"
                                      :git/sha "4bebee47e599b5083161b925609df115ca5f3c75"}}
  :tasks

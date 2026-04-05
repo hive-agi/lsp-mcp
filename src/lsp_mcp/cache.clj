@@ -52,23 +52,54 @@
   [project-id filename]
   (str (cache-dir) "/" project-id "/" filename))
 
-;; In-memory parsed dump cache. Avoids re-parsing 60MB+ EDN on every call.
+;; In-memory parsed cache. Avoids re-parsing on every call.
 ;; Keyed by project-id, invalidated when meta.edn timestamp changes.
 (defonce ^:private parsed-dump-cache
   (atom {})) ;; {project-id {:timestamp <epoch-s> :data <parsed-map>}}
 
+(defn- pre-extracted-available?
+  "Check if pre-extracted focused files exist (produced by sidecar extract.bb)."
+  [project-id]
+  (let [f (io/file (cache-path project-id "var-defs.edn"))]
+    (.exists f)))
+
+(defn- read-pre-extracted
+  "Read pre-extracted focused files (var-defs.edn, call-graph.edn, ns-graph.edn).
+   These are ~100x smaller than dump.edn and parse in <1 second.
+   Returns a synthetic analysis map compatible with the dump format."
+  [project-id]
+  (let [var-defs   (read-edn-file (cache-path project-id "var-defs.edn"))
+        call-graph (read-edn-file (cache-path project-id "call-graph.edn"))
+        ns-graph   (read-edn-file (cache-path project-id "ns-graph.edn"))
+        ns-defs    (read-edn-file (cache-path project-id "ns-defs.edn"))
+        summary    (read-edn-file (cache-path project-id "summary.edn"))]
+    (when var-defs
+      (log/info "Using pre-extracted files for" project-id
+                "(var-defs:" (count var-defs) "calls:" (count call-graph) ")")
+      {:pre-extracted true
+       :summary       summary
+       :var-defs      var-defs
+       :call-graph    call-graph
+       :dep-graph     ns-graph
+       :ns-defs       ns-defs})))
+
 (defn- read-dump-cached
-  "Read dump.edn with in-memory caching. Re-parses only when
-   meta timestamp changes (sidecar re-analyzed)."
+  "Read analysis with in-memory caching. Prefers pre-extracted focused files
+   (fast: <1s) and falls back to monolithic dump.edn (slow: 30s+).
+   Re-parses only when meta timestamp changes (sidecar re-analyzed)."
   [project-id meta-timestamp]
   (let [cached (get @parsed-dump-cache project-id)]
     (if (and cached (= meta-timestamp (:timestamp cached)))
       (do (log/debug "In-memory cache hit for" project-id)
           (:data cached))
-      (let [path (cache-path project-id "dump.edn")
-            data (read-edn-file path)]
+      (let [data (if (pre-extracted-available? project-id)
+                   (read-pre-extracted project-id)
+                   (do (log/warn "No pre-extracted files, falling back to dump.edn"
+                                 "(this may take 30+ seconds for large projects)")
+                       (read-edn-file (cache-path project-id "dump.edn"))))]
         (when data
-          (log/info "Parsed dump.edn for" project-id "(caching in memory)")
+          (log/info "Cached analysis for" project-id
+                    (if (:pre-extracted data) "(pre-extracted)" "(monolithic)"))
           (swap! parsed-dump-cache assoc project-id
                  {:timestamp meta-timestamp :data data}))
         data))))
