@@ -1,9 +1,12 @@
 (ns lsp-mcp.core-test
   "Integration tests for lsp-mcp.core — the public API orchestration layer.
 
-   Tests the full pipeline: analyze → extract → transform → sync to KG.
-   All external dependencies (analysis, bridge) are mocked via with-redefs."
+   Tests the full railway-oriented pipeline:
+     analyze → extract (parallel) → transform → sync to KG.
+   All external dependencies (analysis, bridge) are mocked via with-redefs.
+   Mocks return Results; assertions unwrap with r/ok?/r/err?."
   (:require [clojure.test :refer [deftest is testing]]
+            [hive-dsl.result :as r]
             [lsp-mcp.core :as core]))
 
 ;; =============================================================================
@@ -11,7 +14,7 @@
 ;; =============================================================================
 
 (def sample-raw-analysis
-  "Minimal analysis result as returned by analysis/analyze-project!."
+  "Minimal analysis result as returned by analysis/analyze-project! (unwrapped)."
   {:analysis {"file://src/my/app/core.clj"
               {:var-definitions [{:ns 'my.app.core :name 'start!
                                   :row 10 :col 1
@@ -58,20 +61,22 @@
 ;; =============================================================================
 
 (deftest analyze-test
-  (testing "analyze delegates to analysis/analyze-project! and returns raw result"
-    (with-redefs [lsp-mcp.analysis/analyze-project! (constantly sample-raw-analysis)]
+  (testing "analyze delegates to analysis/analyze-project! and returns ok Result"
+    (with-redefs [lsp-mcp.analysis/analyze-project! (constantly (r/ok sample-raw-analysis))]
       (let [result (core/analyze "/test-project")]
-        (is (map? result))
-        (is (contains? result :analysis))
-        (is (contains? result :dep-graph))
-        (is (= 2 (count (:analysis result))))
-        (is (= 2 (count (:dep-graph result)))))))
+        (is (r/ok? result))
+        (let [raw (:ok result)]
+          (is (contains? raw :analysis))
+          (is (contains? raw :dep-graph))
+          (is (= 2 (count (:analysis raw))))
+          (is (= 2 (count (:dep-graph raw))))))))
 
-  (testing "analyze propagates error map from analysis"
+  (testing "analyze propagates err Result from analysis"
     (with-redefs [lsp-mcp.analysis/analyze-project!
-                  (constantly {:error "No analysis available for test"})]
+                  (constantly (r/err :analysis/lsp-unavailable {:message "test"}))]
       (let [result (core/analyze "/test-project")]
-        (is (contains? result :error))))))
+        (is (r/err? result))
+        (is (= :analysis/lsp-unavailable (:error result)))))))
 
 ;; =============================================================================
 ;; analyze-and-sync! tests
@@ -84,66 +89,76 @@
           mock-sync      (fn [_project-id operations _scope]
                            (reset! synced-entries (:memory-entries operations))
                            (reset! synced-edges (:kg-edges operations))
-                           {:created (count (:memory-entries operations))
-                            :edges   (count (:kg-edges operations))
-                            :errors  []})]
-      (with-redefs [lsp-mcp.analysis/analyze-project! (constantly sample-raw-analysis)
+                           (r/ok {:created (count (:memory-entries operations))
+                                  :edges   (count (:kg-edges operations))
+                                  :errors  []}))]
+      (with-redefs [lsp-mcp.analysis/analyze-project! (constantly (r/ok sample-raw-analysis))
                     lsp-mcp.kg-bridge/sync-to-kg!     mock-sync]
         (let [result (core/analyze-and-sync! "/test-project" "test-proj" "project")]
-          ;; Top-level structure
-          (is (map? result))
-          (is (contains? result :analysis-stats))
-          (is (contains? result :sync-stats))
+          (is (r/ok? result))
+          (let [v (:ok result)]
+            (is (contains? v :analysis-stats))
+            (is (contains? v :sync-stats))
 
-          ;; Analysis stats
-          (let [stats (:analysis-stats result)]
-            (is (number? (:time-ms stats)))
-            ;; 5 total var-defs (start!, stop!, helper, connect, query — includes private)
-            (is (= 5 (:var-defs stats)))
-            ;; 2 call edges (start!→connect, start!→query)
-            (is (= 2 (:calls stats)))
-            ;; 2 namespaces
-            (is (= 2 (:nses stats))))
+            (let [stats (:analysis-stats v)]
+              (is (number? (:time-ms stats)))
+              (is (= 5 (:var-defs stats)))
+              (is (= 2 (:calls stats)))
+              (is (= 2 (:nses stats))))
 
-          ;; Sync stats
-          (let [sync (:sync-stats result)]
-            (is (number? (:time-ms sync)))
-            (is (map? (:result sync)))
-            (is (= 0 (count (:errors (:result sync))))))
+            (let [sync (:sync-stats v)]
+              (is (number? (:time-ms sync)))
+              (is (map? (:result sync)))
+              (is (= 0 (count (:errors (:result sync)))))))
 
-          ;; Verify operations were passed to sync
-          ;; Memory entries: 4 public var entries + 2 namespace entries = 6
+          ;; 4 public var entries + 2 namespace entries = 6
           (is (= 6 (count @synced-entries)))
           (is (every? #(= "snippet" (:type %)) @synced-entries))
 
-          ;; KG edges: 2 call edges + 1 ns-dep edge (core→db) = 3
+          ;; KG edges: 2 call edges + 1 ns-dep edge = 3
           (is (pos? (count @synced-edges)))
           (is (every? :from-key @synced-edges))
           (is (every? :to-key @synced-edges)))))))
 
 (deftest analyze-and-sync!-empty-project-test
   (testing "empty project produces zero stats"
-    (with-redefs [lsp-mcp.analysis/analyze-project! (constantly {:analysis {} :dep-graph {}})
-                  lsp-mcp.kg-bridge/sync-to-kg!     (fn [_ _ _] {:created 0 :edges 0 :errors []})]
-      (let [result (core/analyze-and-sync! "/empty" "empty-proj" "project")
-            stats  (:analysis-stats result)]
-        (is (= 0 (:var-defs stats)))
-        (is (= 0 (:calls stats)))
-        (is (= 0 (:nses stats)))))))
+    (with-redefs [lsp-mcp.analysis/analyze-project!
+                  (constantly (r/ok {:analysis {} :dep-graph {}}))
+                  lsp-mcp.kg-bridge/sync-to-kg!
+                  (fn [_ _ _] (r/ok {:created 0 :edges 0 :errors []}))]
+      (let [result (core/analyze-and-sync! "/empty" "empty-proj" "project")]
+        (is (r/ok? result))
+        (let [stats (get-in result [:ok :analysis-stats])]
+          (is (= 0 (:var-defs stats)))
+          (is (= 0 (:calls stats)))
+          (is (= 0 (:nses stats))))))))
 
 (deftest analyze-and-sync!-graceful-degradation-test
-  (testing "sync failure returns error info without crashing"
-    (with-redefs [lsp-mcp.analysis/analyze-project! (constantly sample-raw-analysis)
+  (testing "sync failure surfaced via Result :errors"
+    (with-redefs [lsp-mcp.analysis/analyze-project! (constantly (r/ok sample-raw-analysis))
                   lsp-mcp.kg-bridge/sync-to-kg!     (fn [_ _ _]
-                                                      {:created 0
-                                                       :edges   0
-                                                       :errors  ["Bridge not available"]})]
+                                                      (r/ok {:created 0
+                                                             :edges   0
+                                                             :errors  ["Bridge not available"]}))]
       (let [result (core/analyze-and-sync! "/test" "test" "project")]
+        (is (r/ok? result))
         ;; Analysis still succeeds (5 total var-defs including private)
-        (is (= 5 (get-in result [:analysis-stats :var-defs])))
-        ;; Sync reports errors
+        (is (= 5 (get-in result [:ok :analysis-stats :var-defs])))
+        ;; Sync errors propagated
         (is (= ["Bridge not available"]
-               (get-in result [:sync-stats :result :errors])))))))
+               (get-in result [:ok :sync-stats :result :errors])))))))
+
+(deftest analyze-and-sync!-short-circuits-on-analysis-err
+  (testing "analyze err short-circuits the pipeline; sync never invoked"
+    (let [sync-called? (atom false)]
+      (with-redefs [lsp-mcp.analysis/analyze-project!
+                    (constantly (r/err :analysis/missing-root {:message "boom"}))
+                    lsp-mcp.kg-bridge/sync-to-kg!
+                    (fn [_ _ _] (reset! sync-called? true) (r/ok {}))]
+        (let [result (core/analyze-and-sync! "" "test" "project")]
+          (is (r/err? result))
+          (is (= :analysis/missing-root (:error result)))
+          (is (false? @sync-called?)))))))
 
 ;; =============================================================================
 ;; status tests

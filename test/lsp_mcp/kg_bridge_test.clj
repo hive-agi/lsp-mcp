@@ -1,6 +1,7 @@
 (ns lsp-mcp.kg-bridge-test
-  "Tests for lsp-mcp.kg-bridge namespace."
+  "Tests for lsp-mcp.kg-bridge — Result-returning bridge + bounded-pmap writes."
   (:require [clojure.test :as t :refer [deftest]]
+            [hive-dsl.result :as r]
             [lsp-mcp.kg-bridge :as kg]))
 
 ;; =============================================================================
@@ -12,11 +13,11 @@
     (t/is (not (kg/available?)))))
 
 ;; =============================================================================
-;; sync-to-kg! — graceful degradation
+;; sync-to-kg! — graceful degradation (no hive-mcp on classpath)
 ;; =============================================================================
 
 (deftest sync-to-kg!-graceful-degradation
-  (t/testing "sync-to-kg! returns zero counts when requiring-resolve fails"
+  (t/testing "sync-to-kg! returns ok Result with errors when bridge missing"
     (let [ops {:memory-entries [{:type "snippet" :content "(defn foo [x])\n  Location: src/my.clj:10"
                                  :tags ["lsp" "function-def" "ns:my.ns"]
                                  :duration "medium"
@@ -26,39 +27,50 @@
                            :source-type :automated :created-by "lsp-mcp"}]
                :stats {:fns 1 :edges 1 :namespaces 0}}
           result (kg/sync-to-kg! "test-project" ops "test-project")]
-      ;; With no hive-mcp on classpath, resolve-fn fails -> no entries created
-      (t/is (= 0 (:created result)))
-      (t/is (= 0 (:edges result)))
-      ;; Entry failures are tracked when index-fn is nil
-      (t/is (vector? (:errors result))))))
+      (t/is (r/ok? result))
+      (let [v (:ok result)]
+        (t/is (= 0 (:created v)))
+        (t/is (= 0 (:edges v)))
+        (t/is (vector? (:errors v)))
+        ;; entry index failed -> error tracked
+        (t/is (pos? (count (:errors v))))))))
 
 ;; =============================================================================
-;; sync-to-kg! — mocked hive-mcp integration
+;; sync-to-kg! — mocked hive-mcp facade
 ;; =============================================================================
+
+(defn- mock-resolver
+  "Build a resolver fn that maps facade syms to mock impls."
+  [{:keys [index edge hash dup scope]}]
+  (fn [sym]
+    (case (str sym)
+      "hive-mcp.vectordb.facade/index-memory-entry!"     index
+      "hive-mcp.knowledge-graph.edges/add-edge!"         edge
+      "hive-mcp.vectordb.facade/content-hash"            hash
+      "hive-mcp.vectordb.facade/find-duplicate"          dup
+      "hive-mcp.tools.memory.scope/inject-project-scope" scope
+      nil)))
 
 (deftest sync-to-kg!-with-mock
   (t/testing "sync-to-kg! processes memory entries and edges via mocked fns"
     (let [added-memory  (atom [])
           added-edges   (atom [])
           entry-counter (atom 0)
-          mock-index  (fn [entry-map]
-                        (swap! added-memory conj entry-map)
-                        (str "id-" (swap! entry-counter inc)))
-          mock-edge   (fn [edge-map]
-                        (swap! added-edges conj edge-map)
-                        (str "edge-" (count @added-edges)))
-          mock-hash   (fn [content] (str "hash-" (hash content)))
-          mock-scope  (fn [tags project-id]
-                        (conj (vec tags) (str "scope:project:" project-id)))]
+          mock-index    (fn [entry-map]
+                          (swap! added-memory conj entry-map)
+                          (str "id-" (swap! entry-counter inc)))
+          mock-edge     (fn [edge-map]
+                          (swap! added-edges conj edge-map)
+                          (str "edge-" (count @added-edges)))
+          mock-hash     (fn [content] (str "hash-" (hash content)))
+          mock-scope    (fn [tags project-id]
+                          (conj (vec tags) (str "scope:project:" project-id)))]
       (with-redefs [lsp-mcp.kg-bridge/resolve-fn
-                    (fn [sym]
-                      (case (str sym)
-                        "hive-mcp.chroma/index-memory-entry!" mock-index
-                        "hive-mcp.knowledge-graph.edges/add-edge!" mock-edge
-                        "hive-mcp.chroma/content-hash" mock-hash
-                        "hive-mcp.chroma/find-duplicate" (constantly nil)
-                        "hive-mcp.tools.memory.scope/inject-project-scope" mock-scope
-                        nil))]
+                    (mock-resolver {:index mock-index
+                                    :edge  mock-edge
+                                    :hash  mock-hash
+                                    :dup   (constantly nil)
+                                    :scope mock-scope})]
         (let [ops {:memory-entries [{:type "snippet" :content "(defn bar [])"
                                      :tags ["lsp"] :duration "medium"
                                      :key "ns:test.ns/bar"}
@@ -70,19 +82,18 @@
                                :source-type :automated :created-by "lsp-mcp"}]
                    :stats {}}
               result (kg/sync-to-kg! "test" ops "test")]
-          (t/is (= 2 (:created result)))
-          (t/is (= 1 (:edges result)))
-          (t/is (empty? (:errors result)) "errors should be empty on success")
+          (t/is (r/ok? result))
+          (let [v (:ok result)]
+            (t/is (= 2 (:created v)))
+            (t/is (= 1 (:edges v)))
+            (t/is (empty? (:errors v)) "errors should be empty on success"))
           (t/is (= 2 (count @added-memory)))
           (t/is (= 1 (count @added-edges)))
-          ;; Verify scope injection happened
           (t/is (some #(= "scope:project:test" %)
                       (:tags (first @added-memory)))
                 "scope tag should be injected")
-          ;; Verify content-hash was attached
           (t/is (contains? (first @added-memory) :content-hash)
                 "content-hash should be set")
-          ;; Verify project-id was passed through
           (t/is (= "test" (:project-id (first @added-memory)))
                 "project-id should be set on entry"))))))
 
@@ -92,54 +103,52 @@
 
 (deftest sync-to-kg!-dedup-test
   (t/testing "sync-to-kg! reuses existing entry IDs on duplicate"
-    (let [added-memory (atom [])
-          mock-dup    (fn [_type _hash & _kv]
-                        {:id "existing-123"})
-          mock-index  (fn [_] (swap! added-memory conj _) "should-not-be-called")
-          mock-hash   (fn [content] (str "hash-" (hash content)))]
+    (let [indexed-once (atom 0)
+          mock-index   (fn [_] (swap! indexed-once inc) "should-not-be-called")
+          mock-hash    (fn [content] (str "hash-" (hash content)))
+          mock-dup     (fn [_type _hash & _kv] {:id "existing-123"})]
       (with-redefs [lsp-mcp.kg-bridge/resolve-fn
-                    (fn [sym]
-                      (case (str sym)
-                        "hive-mcp.chroma/index-memory-entry!" mock-index
-                        "hive-mcp.knowledge-graph.edges/add-edge!" (constantly "e1")
-                        "hive-mcp.chroma/content-hash" mock-hash
-                        "hive-mcp.chroma/find-duplicate" mock-dup
-                        "hive-mcp.tools.memory.scope/inject-project-scope" nil
-                        nil))]
+                    (mock-resolver {:index mock-index
+                                    :edge  (constantly "e1")
+                                    :hash  mock-hash
+                                    :dup   mock-dup
+                                    :scope nil})]
         (let [ops {:memory-entries [{:type "snippet" :content "(defn foo [])"
                                      :tags ["lsp"] :duration "medium"
                                      :key "ns:x/foo"}]
                    :kg-edges []
                    :stats {}}
               result (kg/sync-to-kg! "proj" ops "proj")]
-          ;; Entry reused from duplicate, not indexed again
-          (t/is (= 1 (:created result)))
-          (t/is (empty? @added-memory) "index-memory-entry! should not be called for dups"))))))
+          (t/is (r/ok? result))
+          (t/is (= 1 (:created (:ok result))))
+          (t/is (zero? @indexed-once)
+                "index-memory-entry! should not be called for dups"))))))
 
 ;; =============================================================================
-;; sync-to-kg! — unresolved edges
+;; sync-to-kg! — unresolved edges (skipped silently)
 ;; =============================================================================
 
 (deftest sync-to-kg!-unresolved-edges-test
   (t/testing "edges with unresolvable nodes are skipped (not errors)"
     (let [mock-index (fn [_] "id-1")]
       (with-redefs [lsp-mcp.kg-bridge/resolve-fn
-                    (fn [sym]
-                      (case (str sym)
-                        "hive-mcp.chroma/index-memory-entry!" mock-index
-                        "hive-mcp.knowledge-graph.edges/add-edge!" (constantly "e1")
-                        nil))]
+                    (mock-resolver {:index mock-index
+                                    :edge  (constantly "e1")
+                                    :hash  nil
+                                    :dup   nil
+                                    :scope nil})]
         (let [ops {:memory-entries [{:type "snippet" :content "x"
                                      :tags [] :duration "medium"
                                      :key "a/foo"}]
-                   ;; Edge references "b/bar" which has no memory entry
                    :kg-edges [{:from-key "a/foo" :to-key "b/bar"
                                :relation :depends-on}]
                    :stats {}}
               result (kg/sync-to-kg! "p" ops "p")]
-          (t/is (= 1 (:created result)))
-          (t/is (= 0 (:edges result)) "edge should be skipped, not created")
-          (t/is (empty? (:errors result)) "unresolved edges are debug, not errors"))))))
+          (t/is (r/ok? result))
+          (let [v (:ok result)]
+            (t/is (= 1 (:created v)))
+            (t/is (= 0 (:edges v)) "edge skipped, not created")
+            (t/is (empty? (:errors v)) "unresolved edges are debug, not errors")))))))
 
 ;; =============================================================================
 ;; sync-to-kg! — empty operations
@@ -149,9 +158,11 @@
   (t/testing "handles empty operations gracefully"
     (let [ops {:memory-entries [] :kg-edges [] :stats {}}
           result (kg/sync-to-kg! "test" ops "test")]
-      (t/is (= 0 (:created result)))
-      (t/is (= 0 (:edges result)))
-      (t/is (empty? (:errors result))))))
+      (t/is (r/ok? result))
+      (let [v (:ok result)]
+        (t/is (= 0 (:created v)))
+        (t/is (= 0 (:edges v)))
+        (t/is (empty? (:errors v)))))))
 
 ;; =============================================================================
 ;; sync-to-kg! — edge failure tracking
@@ -159,14 +170,14 @@
 
 (deftest sync-to-kg!-edge-failure-tracked
   (t/testing "failed edge additions are tracked in :errors"
-    (let [mock-index (fn [_] (str "id-" (rand-int 1000)))]
+    (let [counter    (atom 0)
+          mock-index (fn [_] (str "id-" (swap! counter inc)))
+          ;; add-edge! throws -> wrapped as bridge/edge-failed err
+          mock-edge  (fn [_] (throw (ex-info "boom" {})))]
       (with-redefs [lsp-mcp.kg-bridge/resolve-fn
-                    (fn [sym]
-                      (case (str sym)
-                        "hive-mcp.chroma/index-memory-entry!" mock-index
-                        ;; add-edge! returns nil (failure)
-                        "hive-mcp.knowledge-graph.edges/add-edge!" (constantly nil)
-                        nil))]
+                    (mock-resolver {:index mock-index
+                                    :edge  mock-edge
+                                    :hash  nil :dup nil :scope nil})]
         (let [ops {:memory-entries [{:type "snippet" :content "a" :tags ["lsp"] :duration "medium"
                                      :key "ns:x/a"}
                                     {:type "snippet" :content "b" :tags ["lsp"] :duration "medium"
@@ -176,11 +187,13 @@
                                :source-type :automated :created-by "lsp-mcp"}]
                    :stats {}}
               result (kg/sync-to-kg! "test" ops "test")]
-          (t/is (= 2 (:created result)))
-          (t/is (= 0 (:edges result)) "edge count 0 when add-kg-edge! returns nil")
-          (t/is (= 1 (count (:errors result))) "one error for the failed edge")
-          (t/is (.contains ^String (first (:errors result)) "Failed edge")
-                "error message should mention failed edge"))))))
+          (t/is (r/ok? result))
+          (let [v (:ok result)]
+            (t/is (= 2 (:created v)))
+            (t/is (= 0 (:edges v)) "edge count 0 when add-edge! throws")
+            (t/is (= 1 (count (:errors v))) "one error for the failed edge")
+            (t/is (.contains ^String (first (:errors v)) "Failed edge")
+                  "error message should mention failed edge")))))))
 
 ;; =============================================================================
 ;; sync-to-kg! — resolved IDs passed to edge API
@@ -190,17 +203,12 @@
   (t/testing "edges receive resolved memory IDs, not raw keys"
     (let [edge-args     (atom nil)
           entry-counter (atom 0)
-          mock-index  (fn [_]
-                        (str "mem-" (swap! entry-counter inc)))
-          mock-edge   (fn [e]
-                        (reset! edge-args e)
-                        "edge-ok")]
+          mock-index    (fn [_] (str "mem-" (swap! entry-counter inc)))
+          mock-edge     (fn [e] (reset! edge-args e) "edge-ok")]
       (with-redefs [lsp-mcp.kg-bridge/resolve-fn
-                    (fn [sym]
-                      (case (str sym)
-                        "hive-mcp.chroma/index-memory-entry!" mock-index
-                        "hive-mcp.knowledge-graph.edges/add-edge!" mock-edge
-                        nil))]
+                    (mock-resolver {:index mock-index
+                                    :edge  mock-edge
+                                    :hash  nil :dup nil :scope nil})]
         (let [ops {:memory-entries [{:type "snippet" :content "a" :tags ["lsp"] :duration "medium"
                                      :key "ns:x/a"}
                                     {:type "snippet" :content "b" :tags ["lsp"] :duration "medium"
@@ -212,6 +220,8 @@
           (kg/sync-to-kg! "test" ops "test")
           (t/is (some? @edge-args) "mock-edge should have been called")
           (let [e @edge-args]
-            ;; add-kg-edge! extracts :from and :to from the resolved edge-map
-            (t/is (= "mem-1" (:from e)) ":from should be resolved memory ID")
-            (t/is (= "mem-2" (:to e)) ":to should be resolved memory ID")))))))
+            (t/is (#{"mem-1" "mem-2"} (:from e))
+                  ":from should be a resolved memory id (parallel order non-deterministic)")
+            (t/is (#{"mem-1" "mem-2"} (:to e))
+                  ":to should be a resolved memory id")
+            (t/is (not= (:from e) (:to e)))))))))

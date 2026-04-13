@@ -9,6 +9,7 @@
             [clojure.test.check.clojure-test :refer [defspec]]
             [clojure.test.check.generators :as gen]
             [clojure.test.check.properties :as prop]
+            [hive-dsl.result :as r]
             [hive-test.properties :as props]
             [hive-test.generators.core :as gen-core]
             [lsp-mcp.tools :as tools]))
@@ -25,7 +26,7 @@
 
 (defn mock-fixture [f]
   (tools/invalidate-cache!)
-  (with-redefs [lsp-mcp.core/analyze (constantly sample-analysis)]
+  (with-redefs [lsp-mcp.core/analyze (constantly (r/ok sample-analysis))]
     (f))
   (tools/invalidate-cache!))
 
@@ -119,4 +120,4 @@
                        (= 1 (count (:content resp)))
                        (= "text" (get-in resp [:content 0 :type]))
                        (string? text)
-                       (re-find #"project_root" text)))))
+                       (re-find #":params/missing-root" text)))))

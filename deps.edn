@@ -1,7 +1,17 @@
 {:paths ["src" "resources"]
  :deps {org.clojure/clojure {:mvn/version "1.12.0"}
         org.clojure/data.json {:mvn/version "2.5.1"}
-        com.taoensso/timbre {:mvn/version "6.8.0"}}
+        com.taoensso/timbre {:mvn/version "6.8.0"}
+
+        ;; hive-dsl — Result monad (railway-oriented error handling),
+        ;; rescue/guard, lifecycle protocol
+        io.github.hive-agi/hive-dsl
+        {:git/tag "v0.3.9" :git/sha "494af2c"}
+
+        ;; hive-weave — bounded parallel execution primitives
+        ;; (bounded-pmap, fork-join, safe-future, deref-safe)
+        io.github.hive-agi/hive-weave
+        {:git/tag "v0.1.0" :git/sha "63dae4a"}}
  :aliases
  {:test {:extra-paths ["test"]
          :extra-deps {lambdaisland/kaocha {:mvn/version "1.91.1392"}

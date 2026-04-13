@@ -1,7 +1,11 @@
 (ns lsp-mcp.tools-test
-  "Tests for lsp-mcp.tools — MCP tool handler and dispatch."
+  "Tests for lsp-mcp.tools — MCP tool handler and dispatch.
+
+   Handlers now return hive-dsl Results internally; handle-lsp adapts
+   them to MCP responses where :error is a category keyword."
   (:require [clojure.test :refer [deftest is testing use-fixtures]]
             [clojure.edn :as edn]
+            [hive-dsl.result :as r]
             [lsp-mcp.tools :as tools]))
 
 ;; =============================================================================
@@ -9,7 +13,6 @@
 ;; =============================================================================
 
 (def sample-analysis
-  "Minimal analysis result matching what core/analyze returns."
   {:analysis {"file://src/my/app/core.clj"
               {:var-definitions [{:ns 'my.app.core :name 'start!
                                   :row 10 :col 1
@@ -39,11 +42,10 @@
                              :internal?    true}}})
 
 (defn mock-analyze-fixture
-  "Test fixture that mocks core/analyze to return sample-analysis
-   and clears the tools memoization cache before/after each test."
+  "Mocks core/analyze to return ok Result wrapping sample-analysis."
   [f]
   (tools/invalidate-cache!)
-  (with-redefs [lsp-mcp.core/analyze (constantly sample-analysis)]
+  (with-redefs [lsp-mcp.core/analyze (constantly (r/ok sample-analysis))]
     (f))
   (tools/invalidate-cache!))
 
@@ -150,30 +152,30 @@
 ;; =============================================================================
 
 (deftest handle-lsp-unknown-command-test
-  (testing "unknown command returns error with available commands"
+  (testing "unknown command returns err with available commands"
     (let [resp   (tools/handle-lsp {:command "nonexistent"})
           result (parse-response resp)]
       (is (:isError resp))
-      (is (= "Unknown command" (:error result)))
+      (is (= :handler/unknown-command (:error result)))
       (is (= "nonexistent" (:command result)))
-      (is (seq (:available result))))))
+      (is (seq (get-in result [:details :available]))))))
 
 (deftest handle-lsp-exception-test
-  (testing "exception in handler returns error response"
+  (testing "exception in handler returns err response"
     (with-redefs [lsp-mcp.core/analyze (fn [_] (throw (ex-info "Boom" {})))]
       (tools/invalidate-cache!)
       (let [resp   (tools/handle-lsp {:command "analyze" :project_root "/test"})
             result (parse-response resp)]
         (is (:isError resp))
-        (is (= "Failed to handle command" (:error result)))
-        (is (.contains (:details result) "Boom"))))))
+        (is (= :handler/exception (:error result)))
+        (is (.contains ^String (str (:details result)) "Boom"))))))
 
 (deftest handle-lsp-nil-command-test
-  (testing "nil command returns error"
+  (testing "nil command returns err"
     (let [resp   (tools/handle-lsp {:command nil})
           result (parse-response resp)]
       (is (:isError resp))
-      (is (= "Unknown command" (:error result))))))
+      (is (= :handler/unknown-command (:error result))))))
 
 ;; =============================================================================
 ;; tool-def schema tests
@@ -205,30 +207,24 @@
       (is (some #{"references"} enum)))))
 
 ;; =============================================================================
-;; Nil project_root validation tests
+;; Nil project_root validation tests (now :params/missing-root)
 ;; =============================================================================
 
-(deftest handle-lsp-definitions-nil-project-root-test
-  (testing "definitions without project_root returns error (not NPE)"
-    (let [resp   (tools/handle-lsp {:command "definitions"})
-          result (parse-response resp)]
-      (is (:isError resp))
-      (is (string? (:error result)))
-      (is (re-find #"project_root" (:error result)))))
+(defn- assert-missing-root [resp]
+  (let [result (parse-response resp)]
+    (is (:isError resp))
+    (is (= :params/missing-root (:error result)))))
 
-  (testing "definitions with blank project_root returns error"
-    (let [resp   (tools/handle-lsp {:command "definitions" :project_root ""})
-          result (parse-response resp)]
-      (is (:isError resp))
-      (is (string? (:error result))))))
+(deftest handle-lsp-definitions-nil-project-root-test
+  (testing "definitions without project_root returns err :params/missing-root"
+    (assert-missing-root (tools/handle-lsp {:command "definitions"})))
+
+  (testing "definitions with blank project_root returns err"
+    (assert-missing-root (tools/handle-lsp {:command "definitions" :project_root ""}))))
 
 (deftest handle-lsp-callers-nil-project-root-test
-  (testing "callers without project_root returns error"
-    (let [resp   (tools/handle-lsp {:command "callers"})
-          result (parse-response resp)]
-      (is (:isError resp))
-      (is (string? (:error result)))
-      (is (re-find #"project_root" (:error result))))))
+  (testing "callers without project_root returns err"
+    (assert-missing-root (tools/handle-lsp {:command "callers"}))))
 
 (deftest handle-lsp-callers-no-function-test
   (testing "callers without function or namespace returns all call edges"
@@ -238,39 +234,24 @@
       (is (= 1 (count result))))))
 
 (deftest handle-lsp-analyze-nil-project-root-test
-  (testing "analyze without project_root returns error"
-    (let [resp   (tools/handle-lsp {:command "analyze"})
-          result (parse-response resp)]
-      (is (:isError resp))
-      (is (string? (:error result))))))
+  (testing "analyze without project_root returns err"
+    (assert-missing-root (tools/handle-lsp {:command "analyze"}))))
 
 (deftest handle-lsp-calls-nil-project-root-test
-  (testing "calls without project_root returns error"
-    (let [resp   (tools/handle-lsp {:command "calls"})
-          result (parse-response resp)]
-      (is (:isError resp))
-      (is (string? (:error result))))))
+  (testing "calls without project_root returns err"
+    (assert-missing-root (tools/handle-lsp {:command "calls"}))))
 
 (deftest handle-lsp-ns-graph-nil-project-root-test
-  (testing "ns-graph without project_root returns error"
-    (let [resp   (tools/handle-lsp {:command "ns-graph"})
-          result (parse-response resp)]
-      (is (:isError resp))
-      (is (string? (:error result))))))
+  (testing "ns-graph without project_root returns err"
+    (assert-missing-root (tools/handle-lsp {:command "ns-graph"}))))
 
 (deftest handle-lsp-references-nil-project-root-test
-  (testing "references without project_root returns error"
-    (let [resp   (tools/handle-lsp {:command "references"})
-          result (parse-response resp)]
-      (is (:isError resp))
-      (is (string? (:error result))))))
+  (testing "references without project_root returns err"
+    (assert-missing-root (tools/handle-lsp {:command "references"}))))
 
 (deftest handle-lsp-sync-nil-project-root-test
-  (testing "sync without project_root returns error"
-    (let [resp   (tools/handle-lsp {:command "sync"})
-          result (parse-response resp)]
-      (is (:isError resp))
-      (is (string? (:error result))))))
+  (testing "sync without project_root returns err"
+    (assert-missing-root (tools/handle-lsp {:command "sync"}))))
 
 ;; =============================================================================
 ;; Memoization tests
@@ -281,20 +262,18 @@
     (let [call-count (atom 0)]
       (with-redefs [lsp-mcp.core/analyze (fn [_]
                                            (swap! call-count inc)
-                                           sample-analysis)]
+                                           (r/ok sample-analysis))]
         (tools/invalidate-cache!)
-        ;; Three rapid commands for the same project
         (tools/handle-lsp {:command "analyze" :project_root "/test"})
         (tools/handle-lsp {:command "definitions" :project_root "/test"})
         (tools/handle-lsp {:command "calls" :project_root "/test"})
-        ;; core/analyze should only be called once due to memoization
         (is (= 1 @call-count)))))
 
   (testing "different project_root triggers new analysis"
     (let [call-count (atom 0)]
       (with-redefs [lsp-mcp.core/analyze (fn [_]
                                            (swap! call-count inc)
-                                           sample-analysis)]
+                                           (r/ok sample-analysis))]
         (tools/invalidate-cache!)
         (tools/handle-lsp {:command "analyze" :project_root "/project-a"})
         (tools/handle-lsp {:command "analyze" :project_root "/project-b"})
@@ -304,7 +283,7 @@
     (let [call-count (atom 0)]
       (with-redefs [lsp-mcp.core/analyze (fn [_]
                                            (swap! call-count inc)
-                                           sample-analysis)]
+                                           (r/ok sample-analysis))]
         (tools/invalidate-cache!)
         (tools/handle-lsp {:command "analyze" :project_root "/test"})
         (tools/invalidate-cache!)

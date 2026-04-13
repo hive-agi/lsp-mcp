@@ -1,28 +1,30 @@
 (ns lsp-mcp.analysis-test
+  "Unit tests for lsp-mcp.analysis.
+
+   analyze-project! now returns a hive-dsl Result:
+     {:ok analysis-map}      on success
+     {:error category ...}   on failure"
   (:require [clojure.test :refer [deftest is testing]]
+            [hive-dsl.result :as r]
             [lsp-mcp.analysis :as analysis]
             [lsp-mcp.cache :as cache]))
 
 ;; =============================================================================
-;; analyze-project! — nil guard (DBC precondition)
+;; analyze-project! — input guard (railway-oriented)
 ;; =============================================================================
 
-(deftest test-analyze-project!-nil-root
-  (testing "nil project-root returns error map (not NPE)"
+(deftest test-analyze-project!-blank-root-returns-err
+  (testing "nil project-root => err :analysis/missing-root"
     (let [result (analysis/analyze-project! nil)]
-      (is (map? result))
-      (is (string? (:error result)))
-      (is (re-find #"project.root" (:error result)))))
+      (is (r/err? result))
+      (is (= :analysis/missing-root (:error result)))))
 
-  (testing "blank project-root returns error map"
-    (let [result (analysis/analyze-project! "")]
-      (is (map? result))
-      (is (string? (:error result)))))
+  (testing "empty project-root => err"
+    (is (r/err? (analysis/analyze-project! ""))))
 
-  (testing "whitespace-only project-root returns error map"
-    (let [result (analysis/analyze-project! "   ")]
-      (is (map? result))
-      (is (string? (:error result))))))
+  (testing "whitespace-only project-root => err"
+    (is (r/err? (analysis/analyze-project! "   ")))
+    (is (r/err? (analysis/analyze-project! "\t\n")))))
 
 ;; =============================================================================
 ;; Extract — var-definitions
@@ -145,7 +147,7 @@
     (is (= [] (analysis/extract-namespace-graph {})))))
 
 ;; =============================================================================
-;; analyze-project! — integration with mocked cache
+;; analyze-project! — integration with mocked cache (Result-aware)
 ;; =============================================================================
 
 (def ^:private sample-cached-analysis
@@ -159,21 +161,18 @@
                          :internal?    true}}})
 
 (deftest test-analyze-project!-cache-hit
-  (testing "returns cached analysis when cache has fresh data"
+  (testing "returns ok Result wrapping cached analysis when cache fresh"
     (with-redefs [cache/read-analysis (fn [_project-id] sample-cached-analysis)]
       (let [result (analysis/analyze-project! "/tmp/fake-project")]
-        (is (map? result))
-        (is (contains? result :analysis))
-        (is (contains? result :dep-graph))
-        (is (= sample-cached-analysis result))))))
+        (is (r/ok? result))
+        (is (= sample-cached-analysis (:ok result)))))))
 
 (deftest test-analyze-project!-cache-miss-no-lsp
-  (testing "returns error map when cache misses and clojure-lsp not on classpath"
+  (testing "returns err Result when cache misses and clojure-lsp not on classpath"
     (with-redefs [cache/read-analysis (fn [_project-id] nil)]
       (let [result (analysis/analyze-project! "/tmp/fake-project")]
-        (is (map? result))
-        (is (string? (:error result)))
-        (is (.contains ^String (:error result) "fake-project"))))))
+        (is (r/err? result))
+        (is (#{:analysis/lsp-unavailable :analysis/dump-failed} (:error result)))))))
 
 (deftest test-analyze-project!-derives-project-id-from-path
   (testing "project-id is basename of project-root path"
@@ -183,3 +182,4 @@
                                           sample-cached-analysis)]
         (analysis/analyze-project! "/home/user/projects/my-cool-project")
         (is (= "my-cool-project" @queried-id))))))
+

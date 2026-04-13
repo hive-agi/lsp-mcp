@@ -4,56 +4,71 @@
    Reads from Docker sidecar cache (preferred) or falls back to
    in-process clojure-lsp.api/dump when cache is unavailable.
 
-   Extract functions work on the analysis data regardless of source."
+   Railway-oriented: analyze-project! returns a hive-dsl Result
+   ({:ok ...} | {:error category ...data}). Extract fns are pure
+   and operate on raw analysis maps."
   (:require
-   [lsp-mcp.cache :as cache]
    [clojure.java.io :as io]
    [clojure.string :as str]
+   [hive-dsl.result :as r]
+   [lsp-mcp.cache :as cache]
    [lsp-mcp.log :as log]))
 
 ;; =============================================================================
-;; Analysis Source (Cache-First with In-Process Fallback)
+;; Analysis Source (Cache-First with In-Process Fallback) — Railway-Oriented
 ;; =============================================================================
+
+(defn- try-cache
+  "Try cached analysis from Docker sidecar. Returns Result.
+   ok = cached map; err :analysis/cache-miss when nothing cached."
+  [project-id]
+  (if-let [cached (cache/read-analysis project-id)]
+    (do (log/info "Using cached analysis for" project-id)
+        (r/ok cached))
+    (r/err :analysis/cache-miss {:project-id project-id})))
+
+(defn- try-in-process
+  "Fallback to in-process clojure-lsp.api/dump. Returns Result.
+   err :analysis/lsp-unavailable if clojure-lsp not on classpath,
+   err :analysis/dump-failed on dump exception."
+  [project-root]
+  (if-let [dump-fn (try (requiring-resolve 'clojure-lsp.api/dump)
+                        (catch Exception _ nil))]
+    (r/try-effect* :analysis/dump-failed
+      (let [result (dump-fn
+                    {:project-root (io/file project-root)
+                     :output       {:filter-keys [:analysis :dep-graph]}
+                     :analysis     {:type :project-only}})]
+        (:result result)))
+    (r/err :analysis/lsp-unavailable
+           {:message "clojure-lsp not on classpath"})))
 
 (defn analyze-project!
-  "Analyze a project using clojure-lsp.
+  "Analyze a project using clojure-lsp. Returns a Result.
 
    Strategy:
-   1. Try cached analysis from Docker sidecar (fast, no JVM cost)
-   2. Fall back to in-process clojure-lsp.api/dump (if on classpath)
-   3. Return error map if neither available
+   1. Try cached analysis from Docker sidecar (fast)
+   2. Fall back to in-process clojure-lsp.api/dump
+   3. Return err Result if neither available
 
-   project-root - string path to the project root directory."
+   project-root - string path to project root.
+
+   Returns:
+     {:ok analysis-map}     on success
+     {:error category ...}  on failure"
   [project-root]
   (if (str/blank? project-root)
-    {:error "project-root is required for analysis"}
-    (let [project-id (.getName (io/file project-root))]
-      ;; Strategy 1: Cache from Docker sidecar
-      (if-let [cached (cache/read-analysis project-id)]
-        (do
-          (log/info "Using cached analysis for" project-id)
-          cached)
-        ;; Strategy 2: In-process fallback
-        (do
-          (log/info "Cache miss for" project-id ", trying in-process clojure-lsp")
-          (if-let [dump-fn (try (requiring-resolve 'clojure-lsp.api/dump)
-                                (catch Exception _ nil))]
-            (try
-              (let [result (dump-fn
-                            {:project-root (io/file project-root)
-                             :output       {:filter-keys [:analysis :dep-graph]}
-                             :analysis     {:type :project-only}})]
-                (:result result))
-              (catch Exception e
-                (log/error "In-process analysis failed:" (ex-message e))
-                {:error (ex-message e)}))
-            (do
-              (log/warn "No cache and clojure-lsp not on classpath")
-              {:error (str "No analysis available for " project-id
-                           ". Start the LSP sidecar or add clojure-lsp to classpath.")})))))))
+    (r/err :analysis/missing-root
+           {:message "project-root is required for analysis"})
+    (let [project-id (.getName (io/file project-root))
+          cached     (try-cache project-id)]
+      (if (r/ok? cached)
+        cached
+        (do (log/info "Cache miss for" project-id ", trying in-process clojure-lsp")
+            (try-in-process project-root))))))
 
 ;; =============================================================================
-;; Extraction Helpers
+;; Extraction Helpers (pure)
 ;; =============================================================================
 
 (defn- file-uri?
