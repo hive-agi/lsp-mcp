@@ -7,7 +7,8 @@
   (:require [clojure.test :refer [deftest is testing]]
             [hive-dsl.result :as r]
             [lsp-mcp.analysis :as analysis]
-            [lsp-mcp.cache :as cache]))
+            [lsp-mcp.cache :as cache]
+            [lsp-mcp.sidecar :as sidecar]))
 
 ;; =============================================================================
 ;; analyze-project! — input guard (railway-oriented)
@@ -168,11 +169,28 @@
         (is (= sample-cached-analysis (:ok result)))))))
 
 (deftest test-analyze-project!-cache-miss-no-lsp
-  (testing "returns err Result when cache misses and clojure-lsp not on classpath"
-    (with-redefs [cache/read-analysis (fn [_project-id] nil)]
+  (testing "returns err Result with structured fix info when all sources fail"
+    (with-redefs [cache/read-analysis (fn [_project-id] nil)
+                  ;; Mock sidecar to avoid actual Docker calls in tests
+                  lsp-mcp.sidecar/ensure-analysis! (fn [_pid]
+                                                      {:error :analysis/sidecar-unavailable
+                                                       :fix   :start-sidecar
+                                                       :command "docker compose up -d lsp-sidecar"
+                                                       :message "mock sidecar unavailable"})]
       (let [result (analysis/analyze-project! "/tmp/fake-project")]
         (is (r/err? result))
-        (is (#{:analysis/lsp-unavailable :analysis/dump-failed} (:error result)))))))
+        (is (#{:analysis/lsp-unavailable :analysis/dump-failed
+               :analysis/sidecar-unavailable :analysis/sidecar-timeout}
+             (:error result)))
+        ;; GOAL 2: structured errors must include :fix
+        (is (keyword? (:fix result))
+            "Error result must include :fix key for self-remediation"))))
+
+  (testing "structured error on missing-root includes :fix :init-project"
+    (let [result (analysis/analyze-project! nil)]
+      (is (= :analysis/missing-root (:error result)))
+      (is (= :init-project (:fix result)))
+      (is (string? (:hint result))))))
 
 (deftest test-analyze-project!-derives-project-id-from-path
   (testing "project-id is basename of project-root path"

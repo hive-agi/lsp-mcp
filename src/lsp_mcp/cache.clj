@@ -11,6 +11,7 @@
 
    CLARITY-L: Pure read-only bridge layer, no domain logic."
   (:require
+   [babashka.fs :as fs]
    [clojure.edn :as edn]
    [clojure.java.io :as io]
    [lsp-mcp.log :as log]))
@@ -31,6 +32,37 @@
   []
   (or (System/getenv "LSP_CACHE_DIR")
       default-cache-dir))
+
+(def ^:private default-workspace-root
+  (str (System/getProperty "user.home") "/PP"))
+
+(defn workspace-root
+  "Host-side root that the sidecar mounts as /workspace.
+   Must match the docker-compose HIVE_LSP_WORKSPACE_ROOT setting.
+   Priority: HIVE_LSP_WORKSPACE_ROOT env var > ~/PP."
+  []
+  (or (System/getenv "HIVE_LSP_WORKSPACE_ROOT")
+      default-workspace-root))
+
+(defn project-id-for
+  "Compute the sidecar project-id for a host-side project-root path.
+
+   The id is the path relative to (workspace-root), with forward slashes —
+   matching how analyze.sh resolves $WORKSPACE/$project_id inside the
+   container. Returns nil when project-root is outside workspace-root."
+  [project-root]
+  (when (and project-root (fs/exists? project-root))
+    (let [root (fs/canonicalize (workspace-root))
+          proj (fs/canonicalize project-root)]
+      (cond
+        (= proj root)
+        ;; Root itself: matches analyze.sh's "workspace" sentinel.
+        "workspace"
+
+        (fs/starts-with? proj root)
+        (str (fs/relativize root proj))
+
+        :else nil))))
 
 ;; =============================================================================
 ;; Internal Helpers

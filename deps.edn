@@ -11,7 +11,15 @@
         ;; hive-weave — bounded parallel execution primitives
         ;; (bounded-pmap, fork-join, safe-future, deref-safe)
         io.github.hive-agi/hive-weave
-        {:git/tag "v0.1.0" :git/sha "63dae4a"}}
+        {:git/tag "v0.1.0" :git/sha "63dae4a"}
+
+        ;; hive-system — DIP protocols + sugar for shell, fs, process
+        ;; (replaces ad-hoc clojure.java.shell/sh and .getCanonicalPath)
+        io.github.hive-agi/hive-system
+        {:local/root "../hive-system"}
+
+        ;; babashka.fs — filesystem sugar (canonicalize, relativize, etc.)
+        babashka/fs {:mvn/version "0.5.32"}}
  :aliases
  {:test {:extra-paths ["test"]
          :extra-deps {lambdaisland/kaocha {:mvn/version "1.91.1392"}

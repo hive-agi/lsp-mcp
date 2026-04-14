@@ -3,6 +3,7 @@
 
    Reads from Docker sidecar cache (preferred) or falls back to
    in-process clojure-lsp.api/dump when cache is unavailable.
+   When both fail, triggers the sidecar on-demand and awaits results.
 
    Railway-oriented: analyze-project! returns a hive-dsl Result
    ({:ok ...} | {:error category ...data}). Extract fns are pure
@@ -12,6 +13,7 @@
    [clojure.string :as str]
    [hive-dsl.result :as r]
    [lsp-mcp.cache :as cache]
+   [lsp-mcp.sidecar :as sidecar]
    [lsp-mcp.log :as log]))
 
 ;; =============================================================================
@@ -20,17 +22,23 @@
 
 (defn- try-cache
   "Try cached analysis from Docker sidecar. Returns Result.
-   ok = cached map; err :analysis/cache-miss when nothing cached."
+   ok = cached map; err :analysis/cache-miss with structured fix info."
   [project-id]
   (if-let [cached (cache/read-analysis project-id)]
     (do (log/info "Using cached analysis for" project-id)
         (r/ok cached))
-    (r/err :analysis/cache-miss {:project-id project-id})))
+    (r/err :analysis/cache-miss
+           {:project-id project-id
+            :fix        :trigger-sidecar
+            :command    "docker exec hive-mcp-lsp-sidecar kill -HUP 1"
+            :hint       (str "No cached analysis for '" project-id "'. "
+                             "Trigger sidecar or wait for next cycle.")
+            :message    (str "Cache miss for project: " project-id)})))
 
 (defn- try-in-process
   "Fallback to in-process clojure-lsp.api/dump. Returns Result.
-   err :analysis/lsp-unavailable if clojure-lsp not on classpath,
-   err :analysis/dump-failed on dump exception."
+   err :analysis/lsp-unavailable with structured fix if clojure-lsp not on classpath,
+   err :analysis/dump-failed with structured fix on dump exception."
   [project-root]
   (if-let [dump-fn (try (requiring-resolve 'clojure-lsp.api/dump)
                         (catch Exception _ nil))]
@@ -41,7 +49,22 @@
                      :analysis     {:type :project-only}})]
         (:result result)))
     (r/err :analysis/lsp-unavailable
-           {:message "clojure-lsp not on classpath"})))
+           {:fix     :trigger-sidecar
+            :command "docker compose up -d lsp-sidecar"
+            :hint    (str "clojure-lsp not on classpath. "
+                          "Use the Docker sidecar for analysis, or add clojure-lsp as a dependency.")
+            :message "clojure-lsp not on classpath"})))
+
+(defn- try-sidecar-on-demand
+  "Last resort: trigger the Docker sidecar to analyze on demand and await results.
+   Returns Result — ok with analysis or err with structured timeout/unavailable info."
+  [project-id]
+  (log/info "Triggering on-demand sidecar analysis for" project-id)
+  (let [result (sidecar/ensure-analysis! project-id)]
+    (if (:ok result)
+      (r/ok (:ok result))
+      (r/err (:error result)
+             (dissoc result :error)))))
 
 (defn analyze-project!
   "Analyze a project using clojure-lsp. Returns a Result.
@@ -49,23 +72,46 @@
    Strategy:
    1. Try cached analysis from Docker sidecar (fast)
    2. Fall back to in-process clojure-lsp.api/dump
-   3. Return err Result if neither available
+   3. Trigger sidecar on-demand and await (lazy spawn)
+   4. Return structured err Result if all fail
 
    project-root - string path to project root.
 
    Returns:
      {:ok analysis-map}     on success
-     {:error category ...}  on failure"
+     {:error category :fix keyword :command str :hint str :message str}  on failure"
   [project-root]
   (if (str/blank? project-root)
     (r/err :analysis/missing-root
-           {:message "project-root is required for analysis"})
-    (let [project-id (.getName (io/file project-root))
-          cached     (try-cache project-id)]
-      (if (r/ok? cached)
-        cached
-        (do (log/info "Cache miss for" project-id ", trying in-process clojure-lsp")
-            (try-in-process project-root))))))
+           {:fix     :init-project
+            :hint    "Create deps.edn (or project.clj) at the project root directory."
+            :command "echo '{:deps {}}' > deps.edn"
+            :message "project-root is required for analysis"})
+    (if-let [project-id (cache/project-id-for project-root)]
+      (let [cached (try-cache project-id)]
+        (if (r/ok? cached)
+          cached
+          (let [in-proc (try-in-process project-root)]
+            (if (r/ok? in-proc)
+              in-proc
+              ;; Both cache and in-process failed — try on-demand sidecar
+              (do (log/info "Cache miss + in-process unavailable for" project-id
+                            ", triggering sidecar on-demand")
+                  (try-sidecar-on-demand project-id))))))
+      (r/err :analysis/outside-workspace
+             {:project-root  project-root
+              :workspace-root (cache/workspace-root)
+              :fix           :widen-workspace-mount
+              :command       (str "export HIVE_LSP_WORKSPACE_ROOT=<host-parent-dir> && "
+                                  "docker compose -f hive-mcp/docker-compose.yml "
+                                  "up -d --force-recreate lsp-sidecar")
+              :hint          (str "project-root is outside the sidecar workspace mount ("
+                                  (cache/workspace-root) "). "
+                                  "Set HIVE_LSP_WORKSPACE_ROOT to a parent directory "
+                                  "that contains both the workspace and the project, "
+                                  "then restart the sidecar.")
+              :message       (str "project-root " project-root
+                                  " not under workspace-root " (cache/workspace-root))}))))
 
 ;; =============================================================================
 ;; Extraction Helpers (pure)
