@@ -6,7 +6,7 @@
         ;; hive-dsl — Result monad (railway-oriented error handling),
         ;; rescue/guard, lifecycle protocol
         io.github.hive-agi/hive-dsl
-        {:git/tag "v0.3.9" :git/sha "494af2c"}
+        {:git/tag "v0.4.0" :git/sha "c561cb7"}
 
         ;; hive-weave — bounded parallel execution primitives
         ;; (bounded-pmap, fork-join, safe-future, deref-safe)
@@ -25,6 +25,6 @@
          :extra-deps {lambdaisland/kaocha {:mvn/version "1.91.1392"}
                       org.clojure/test.check {:mvn/version "1.1.1"}
                       io.github.hive-agi/hive-test
-                      {:git/tag "v0.1.6" :git/sha "a53e9f8"}}}
+                      {:git/tag "v0.2.0" :git/sha "841da83"}}}
   ;; Optional: add clojure-lsp for in-process fallback (not required for cache-first mode)
   :with-lsp {:extra-deps {com.github.clojure-lsp/clojure-lsp {:mvn/version "2026.02.20-16.08.58"}}}}}
