@@ -11,7 +11,7 @@
         ;; hive-weave — bounded parallel execution primitives
         ;; (bounded-pmap, fork-join, safe-future, deref-safe)
         io.github.hive-agi/hive-weave
-        {:git/tag "v0.1.0" :git/sha "63dae4a"}
+        {:git/tag "v0.2.1" :git/sha "51bed20"}
 
         ;; hive-system — DIP protocols + sugar for shell, fs, process
         ;; (replaces ad-hoc clojure.java.shell/sh and .getCanonicalPath)
