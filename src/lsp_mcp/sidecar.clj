@@ -14,6 +14,7 @@
    [clojure.java.io :as io]
    [clojure.string :as str]
    [hive-dsl.result :as r]
+   [hive-help.diag :as diag]
    [hive-system.shell.core :as sh]
    [lsp-mcp.cache :as cache]
    [lsp-mcp.log :as log]))
@@ -191,44 +192,89 @@
 ;; Orchestrator
 ;; =============================================================================
 
+(defn- project-id-resolves?
+  "True when `project-id` maps to a host directory the sidecar can see.
+
+   The sidecar mounts `(cache/workspace-root)` as `/workspace` and
+   resolves a request as `/workspace/<project-id>`. If that host path
+   does not exist as a directory, awaiting the cache would burn the
+   full timeout while clojure-lsp dump fails inside the container.
+
+   Special case: `\"workspace\"` is the sentinel for the workspace
+   root itself (matches `cache/project-id-for` behavior)."
+  [project-id]
+  (or (= "workspace" project-id)
+      (let [^java.io.File f (java.io.File.
+                             ^String (str (cache/workspace-root) "/" project-id))]
+        (.isDirectory f))))
+
+(defn- unresolvable-project-id-error
+  "Build the structured error for a project-id that doesn't map to a
+   host directory under the workspace mount. Uses hive-help.diag for
+   the ELM-shaped message."
+  [project-id]
+  (let [ws (cache/workspace-root)]
+    {:error   :analysis/unresolvable-project-id
+     :fix     :pass-resolvable-id
+     :command "ls $HIVE_LSP_WORKSPACE_ROOT"
+     :project-id project-id
+     :workspace-root (str ws)
+     :hint    (diag/unresolvable-scope-message
+               {:scope    project-id
+                :tried    [{:strategy "host directory under workspace mount"
+                            :result   (str "no directory at " ws "/" project-id)}]
+                :examples [(str ws "/<some-existing-subdir>")
+                           "workspace  ; sentinel for the mount itself"]
+                :hint     (str "The sidecar resolves project-id as <workspace>/<id>. "
+                               "Pass an existing host directory under "
+                               (pr-str (str ws)) ", or the literal "
+                               "\"workspace\" for the mount itself.")})
+     :message (str "Cannot resolve project-id " (pr-str project-id)
+                   " to a host directory under workspace " (pr-str (str ws)))}))
+
 (defn ensure-analysis!
   "Ensure analysis is available for project-id.
 
    Strategy:
    1. Check cache (fast path)
-   2. Auto-start sidecar if not running (lazy spawn)
-   3. Request sidecar analysis + await
-   4. Return analysis map or structured error
+   2. Validate project-id resolves to a host dir under workspace
+   3. Auto-start sidecar if not running (lazy spawn)
+   4. Request sidecar analysis + await
+   5. Return analysis map or structured error
 
    Returns:
      {:ok analysis-map}   on success
+     {:error :analysis/unresolvable-project-id ...} when project-id has no host dir
      {:error :analysis/sidecar-timeout :fix :trigger-sidecar ...} on timeout
      {:error :analysis/sidecar-unavailable ...} on request/start failure"
   [project-id]
-  ;; Fast path: cache already has it
+  ;; Fast path: cache already has it (even for now-stale project-ids).
   (if-let [cached (cache/read-analysis project-id)]
     {:ok cached}
-    ;; Slow path: ensure sidecar is up, then trigger
-    (let [ready (ensure-sidecar-running!)]
-      (if (:error ready)
-        ready
-        (let [req-result (request-analysis! project-id)]
-          (if (:error req-result)
-            {:error   :analysis/sidecar-unavailable
-             :fix     :start-sidecar
-             :command "docker compose up -d lsp-sidecar"
-             :hint    "LSP sidecar container not reachable. Start it with docker compose."
-             :message (:error req-result)}
-            ;; Await cache population
-            (if-let [data (await-cache-ready project-id)]
-              {:ok data}
-              {:error     :analysis/sidecar-timeout
-               :fix       :trigger-sidecar
-               :command   (str "docker exec " sidecar-container " kill -HUP 1")
-               :hint      (str "Sidecar did not produce analysis for '" project-id
-                               "' within " (quot default-timeout-ms 1000) "s. "
-                               "Check sidecar logs: docker logs " sidecar-container)
-               :message   (str "Timed out waiting for sidecar analysis of " project-id)})))))))
+    (if-not (project-id-resolves? project-id)
+      ;; Fail fast — would otherwise burn the 60s await-cache-ready timeout.
+      (unresolvable-project-id-error project-id)
+      ;; Slow path: ensure sidecar is up, then trigger
+      (let [ready (ensure-sidecar-running!)]
+        (if (:error ready)
+          ready
+          (let [req-result (request-analysis! project-id)]
+            (if (:error req-result)
+              {:error   :analysis/sidecar-unavailable
+               :fix     :start-sidecar
+               :command "docker compose up -d lsp-sidecar"
+               :hint    "LSP sidecar container not reachable. Start it with docker compose."
+               :message (:error req-result)}
+              ;; Await cache population
+              (if-let [data (await-cache-ready project-id)]
+                {:ok data}
+                {:error     :analysis/sidecar-timeout
+                 :fix       :trigger-sidecar
+                 :command   (str "docker exec " sidecar-container " kill -HUP 1")
+                 :hint      (str "Sidecar did not produce analysis for '" project-id
+                                 "' within " (quot default-timeout-ms 1000) "s. "
+                                 "Check sidecar logs: docker logs " sidecar-container)
+                 :message   (str "Timed out waiting for sidecar analysis of " project-id)}))))))))
 
 (defn sidecar-running?
   "Check if the LSP sidecar container is running."

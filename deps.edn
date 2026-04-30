@@ -23,6 +23,11 @@
         io.github.hive-agi/hive-system
         {:local/root "../hive-system"}
 
+        ;; hive-help — Elm-style diagnostic message builders
+        ;; (param coercion + project-level diag for sidecar pre-flight)
+        io.github.hive-agi/hive-help
+        {:local/root "../hive-help"}
+
         ;; babashka.fs — filesystem sugar (canonicalize, relativize, etc.)
         babashka/fs {:mvn/version "0.5.32"}}
  :aliases

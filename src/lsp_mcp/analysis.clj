@@ -10,9 +10,12 @@
    and operate on raw analysis maps."
   (:require
    [clojure.java.io :as io]
+   [clojure.set :as set]
    [clojure.string :as str]
    [hive-dsl.result :as r]
+   [hive-help.diag :as diag]
    [lsp-mcp.cache :as cache]
+   [lsp-mcp.deps :as deps]
    [lsp-mcp.sidecar :as sidecar]
    [lsp-mcp.log :as log]))
 
@@ -54,16 +57,66 @@
                           "Use the Docker sidecar for analysis, or add clojure-lsp as a dependency.")
             :message "clojure-lsp not on classpath"})))
 
+(defn- validate-local-roots*
+  "Pre-flight: read deps.edn at project-root and verify every
+   `:local/root` dep canonicalizes UNDER the sidecar workspace mount.
+
+   Returning a Result avoids the 60s timeout that otherwise occurs
+   when clojure-lsp inside the container fails to resolve a host-only
+   path. Advisory: when deps.edn is missing or unparseable, returns
+   nil (no opinion) — many projects use project.clj or no deps file.
+
+   Returns nil on pass, {:error :analysis/local-root-deps-unreachable
+   ...} on fail."
+  [project-root]
+  (let [f (io/file project-root "deps.edn")]
+    (when (.exists f)
+      (when-let [parsed (deps/parse-deps-edn (slurp f))]
+        (let [locals      (deps/local-root-deps parsed)
+              ws-root     (cache/workspace-root)
+              unreachable (deps/unreachable-roots locals project-root ws-root)]
+          (when (seq unreachable)
+            (r/err :analysis/local-root-deps-unreachable
+                   {:project-root   project-root
+                    :workspace-root (str ws-root)
+                    :unreachable    unreachable
+                    :fix            :align-local-roots
+                    :command        (str "export HIVE_LSP_WORKSPACE_ROOT=<parent-of-all-roots> && "
+                                         "docker compose -f hive-mcp/docker-compose.yml "
+                                         "up -d --force-recreate lsp-sidecar")
+                    :hint           (diag/unreachable-paths-message
+                                     {:context        (str "deps.edn at " project-root)
+                                      :consumer       "the sidecar container"
+                                      :reachable-from (str ws-root " (mounted as /workspace)")
+                                      :unreachable    (mapv #(set/rename-keys % {:dep :label
+                                                                                 :resolved :path})
+                                                            unreachable)
+                                      :wrong          ":local/root \"../sibling-outside-workspace\""
+                                      :right          [":git/sha    \"abc123\"        ; preferred"
+                                                       ":mvn/version \"0.1.0\""
+                                                       ":local/root \"<path-inside-workspace>\""]
+                                      :command        (str "docker compose -f hive-mcp/docker-compose.yml "
+                                                           "up -d --force-recreate lsp-sidecar")})
+                    :message        (format "%d :local/root dep(s) outside sidecar workspace mount %s"
+                                            (count unreachable)
+                                            (pr-str (str ws-root)))})))))))
+
 (defn- try-sidecar-on-demand
   "Last resort: trigger the Docker sidecar to analyze on demand and await results.
-   Returns Result — ok with analysis or err with structured timeout/unavailable info."
-  [project-id]
-  (log/info "Triggering on-demand sidecar analysis for" project-id)
-  (let [result (sidecar/ensure-analysis! project-id)]
-    (if (:ok result)
-      (r/ok (:ok result))
-      (r/err (:error result)
-             (dissoc result :error)))))
+   Returns Result — ok with analysis or err with structured timeout/unavailable info.
+
+   Pre-flights `validate-local-roots*` first: any unreachable
+   :local/root deps would silently make the sidecar produce 0 forms
+   (or hang for the full 60s timeout). Surfacing them here is faster
+   and more actionable."
+  [project-root project-id]
+  (or (validate-local-roots* project-root)
+      (do (log/info "Triggering on-demand sidecar analysis for" project-id)
+          (let [result (sidecar/ensure-analysis! project-id)]
+            (if (:ok result)
+              (r/ok (:ok result))
+              (r/err (:error result)
+                     (dissoc result :error)))))))
 
 (defn analyze-project!
   "Analyze a project using clojure-lsp. Returns a Result.
@@ -96,7 +149,7 @@
               ;; Both cache and in-process failed — try on-demand sidecar
               (do (log/info "Cache miss + in-process unavailable for" project-id
                             ", triggering sidecar on-demand")
-                  (try-sidecar-on-demand project-id))))))
+                  (try-sidecar-on-demand project-root project-id))))))
       (r/err :analysis/outside-workspace
              {:project-root  project-root
               :workspace-root (cache/workspace-root)

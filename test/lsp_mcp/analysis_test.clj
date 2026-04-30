@@ -201,3 +201,60 @@
         (analysis/analyze-project! "/home/user/projects/my-cool-project")
         (is (= "my-cool-project" @queried-id))))))
 
+;; =============================================================================
+;; analyze-project! — :local/root pre-flight (sidecar path)
+;; =============================================================================
+
+(defn- with-temp-deps-edn
+  "Write `content` to a fresh temp project root, call `f` with that
+   path, then clean up. Returns the value f returned."
+  [content f]
+  (let [dir (java.nio.file.Files/createTempDirectory
+             "lsp-mcp-deps-test"
+             (make-array java.nio.file.attribute.FileAttribute 0))]
+    (try
+      (spit (str dir "/deps.edn") content)
+      (f (str dir))
+      (finally
+        (try (java.nio.file.Files/delete (.resolve dir "deps.edn")) (catch Exception _))
+        (try (java.nio.file.Files/delete dir) (catch Exception _))))))
+
+(deftest test-analyze-project!-local-root-unreachable-fails-fast
+  (testing "deps.edn with :local/root pointing outside workspace returns ELM error"
+    (with-temp-deps-edn
+      "{:deps {a/b {:local/root \"/nowhere/foreign\"}}}"
+      (fn [project-root]
+        (with-redefs [cache/read-analysis (fn [_] nil)
+                      cache/workspace-root (fn [] "/strictly-isolated-workspace")
+                      cache/project-id-for (fn [_] "fake-id")
+                      sidecar/ensure-analysis! (fn [_]
+                                                 (throw (ex-info "must-not-call-sidecar" {})))]
+          (let [result (analysis/analyze-project! project-root)]
+            (is (r/err? result))
+            (is (= :analysis/local-root-deps-unreachable (:error result)))
+            (is (= :align-local-roots (:fix result)))
+            (is (= 1 (count (:unreachable result))))
+            (is (= 'a/b (:dep (first (:unreachable result)))))
+            (is (string? (:hint result)))
+            (is (clojure.string/includes? (:hint result) "/nowhere/foreign"))
+            (is (clojure.string/includes? (:hint result) "the sidecar container"))
+            (is (clojure.string/includes? (:hint result) "WRONG:"))
+            (is (clojure.string/includes? (:hint result) "RIGHT:"))))))))
+
+(deftest test-analyze-project!-local-root-reachable-passes
+  (testing "deps.edn with reachable :local/root falls through to sidecar"
+    (with-temp-deps-edn
+      "{:deps {a/b {:mvn/version \"1.0\"}}}"
+      (fn [project-root]
+        (with-redefs [cache/read-analysis (fn [_] nil)
+                      cache/workspace-root (fn [] project-root)
+                      cache/project-id-for (fn [_] "fake-id")
+                      sidecar/ensure-analysis! (fn [_]
+                                                 {:error :analysis/sidecar-unavailable
+                                                  :message "passthrough"})]
+          (let [result (analysis/analyze-project! project-root)]
+            (is (r/err? result))
+            ;; The pre-flight passed (no :local/root deps at all).
+            ;; Result should reflect downstream sidecar error, not validate.
+            (is (= :analysis/sidecar-unavailable (:error result)))))))))
+
