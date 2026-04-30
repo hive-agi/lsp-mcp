@@ -35,8 +35,15 @@
    (str (System/getProperty "user.home") "/PP/hive/hive-mcp/docker-compose.yml")])
 
 (def ^:private default-timeout-ms
-  "Max time to wait for sidecar analysis to complete."
-  60000)
+  "Max time to wait for sidecar analysis to complete.
+   Overridable via `LSP_SIDECAR_TIMEOUT_MS` env var — large projects
+   (hive-knowledge, hive-mcp with 500+ forms) routinely exceed the
+   60s baseline. Invalid values fall back to 60000."
+  (or (try
+        (some-> (System/getenv "LSP_SIDECAR_TIMEOUT_MS")
+                Long/parseLong)
+        (catch NumberFormatException _ nil))
+      60000))
 
 (def ^:private poll-interval-ms
   "Interval between cache-ready polls."
@@ -226,11 +233,10 @@
 (defn sidecar-running?
   "Check if the LSP sidecar container is running."
   []
-  (try
+  (r/rescue false
     (let [result (sh/exec! ["docker" "inspect" "-f" "{{.State.Running}}"
                             sidecar-container])
           {:keys [exit stdout]} (:ok result)]
       (and (r/ok? result)
            (zero? (or exit -1))
-           (= "true" (str/trim (or stdout "")))))
-    (catch Exception _ false)))
+           (= "true" (str/trim (or stdout "")))))))

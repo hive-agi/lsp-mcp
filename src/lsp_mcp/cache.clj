@@ -9,40 +9,38 @@
      <cache-dir>/<project-id>/dump.edn   - full analysis result
      <cache-dir>/<project-id>/meta.edn   - freshness metadata
 
-   CLARITY-L: Pure read-only bridge layer, no domain logic."
+   CLARITY-L: Pure read-only bridge layer, no domain logic.
+
+   Config: cache-dir / workspace-root resolve through lsp-mcp.config
+   (hive-di defconfig). Thin wrappers here preserve the existing API
+   surface — callers already reach for lsp-mcp.cache/cache-dir."
   (:require
    [babashka.fs :as fs]
    [clojure.edn :as edn]
    [clojure.java.io :as io]
+   [lsp-mcp.config :as config]
    [lsp-mcp.log :as log]))
 
 ;; =============================================================================
 ;; Configuration
 ;; =============================================================================
 
-(def ^:private default-cache-dir
-  (str (System/getProperty "user.home") "/.cache/hive-lsp"))
 (def ^:private default-max-age-ms
   "Default max age for cached analysis: 10 minutes."
   (* 10 60 1000))
 
 (defn cache-dir
-  "Resolve the LSP cache directory.
+  "Resolve the LSP cache directory via lsp-mcp.config.
    Priority: LSP_CACHE_DIR env var > ~/.cache/hive-lsp."
   []
-  (or (System/getenv "LSP_CACHE_DIR")
-      default-cache-dir))
-
-(def ^:private default-workspace-root
-  (str (System/getProperty "user.home") "/PP"))
+  (config/cache-dir))
 
 (defn workspace-root
   "Host-side root that the sidecar mounts as /workspace.
    Must match the docker-compose HIVE_LSP_WORKSPACE_ROOT setting.
    Priority: HIVE_LSP_WORKSPACE_ROOT env var > ~/PP."
   []
-  (or (System/getenv "HIVE_LSP_WORKSPACE_ROOT")
-      default-workspace-root))
+  (config/workspace-root))
 
 (defn project-id-for
   "Compute the sidecar project-id for a host-side project-root path.

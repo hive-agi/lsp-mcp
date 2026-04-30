@@ -40,8 +40,7 @@
    err :analysis/lsp-unavailable with structured fix if clojure-lsp not on classpath,
    err :analysis/dump-failed with structured fix on dump exception."
   [project-root]
-  (if-let [dump-fn (try (requiring-resolve 'clojure-lsp.api/dump)
-                        (catch Exception _ nil))]
+  (if-let [dump-fn (r/rescue nil (requiring-resolve 'clojure-lsp.api/dump))]
     (r/try-effect* :analysis/dump-failed
       (let [result (dump-fn
                     {:project-root (io/file project-root)

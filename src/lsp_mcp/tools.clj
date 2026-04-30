@@ -131,9 +131,64 @@
           function  (filter #(= (str (:caller-fn %)) function))
           true      vec)))))
 
-(defn- h-ns-graph [params]
+(defn- h-ns-graph
+  "Namespace dependency graph.
+
+   Optional params (programmatic budget):
+     :namespace  filter to subgraph reachable from this ns root
+     :depth      BFS depth from :namespace (default 2; ignored if :namespace nil)
+     :max-nodes  cap on returned node count (default 100; suppressed if :raw true)
+     :raw        when true, bypass cap and return full graph
+
+   Returns:
+     {:ns-graph [{:ns sym :depends-on #{sym} :dependents #{sym} :internal? bool}]
+      :total    int   ;; full project node count
+      :returned int   ;; node count in response
+      :truncated? bool
+      :hint?    str   ;; populated only when truncated"
+  [{:keys [namespace depth max-nodes raw] :as params}]
   (with-analysis params
-    (fn [raw] (analysis/extract-namespace-graph (:dep-graph raw)))))
+    (fn [raw-data]
+      (let [full       (analysis/extract-namespace-graph (:dep-graph raw-data))
+            total      (count full)
+            depth      (or depth 2)
+            max-nodes  (or max-nodes 100)
+            ;; BFS to subgraph if root namespace given
+            subgraph   (if (str/blank? namespace)
+                         full
+                         (let [by-ns (into {} (map (juxt (comp str :ns) identity)) full)
+                               root  (str namespace)]
+                           (loop [frontier #{root}
+                                  seen     #{}
+                                  d        0
+                                  acc      []]
+                             (if (or (empty? frontier) (> d depth))
+                               acc
+                               (let [next-acc  (into acc
+                                                     (keep #(get by-ns %))
+                                                     frontier)
+                                     seen'     (into seen frontier)
+                                     neighbors (->> frontier
+                                                    (mapcat (fn [n]
+                                                              (let [entry (get by-ns n)]
+                                                                (concat (map str (:depends-on entry))
+                                                                        (map str (:dependents entry))))))
+                                                    (remove seen')
+                                                    set)]
+                                 (recur neighbors seen' (inc d) next-acc))))))
+            n          (count subgraph)
+            truncated? (and (not raw) (> n max-nodes))
+            returned   (if truncated? (vec (take max-nodes subgraph)) (vec subgraph))]
+        (cond-> {:ns-graph returned
+                 :total    total
+                 :returned (count returned)
+                 :truncated? truncated?}
+          truncated?
+          (assoc :hint
+                 (str "Result truncated to " max-nodes " of " n
+                      " nodes. Pass :raw true for full graph, "
+                      ":max-nodes N for a different cap, "
+                      "or :namespace + :depth to scope the BFS.")))))))
 
 (defn- h-callers [{:keys [function namespace] :as params}]
   (with-analysis params
@@ -163,8 +218,7 @@
     (core/analyze-and-sync! project_root project_id scope)))
 
 (defn- h-status [_]
-  (ok {:bridge-available? (some? (try (requiring-resolve 'hive-mcp.knowledge-graph.edges/add-edge!)
-                                      (catch Exception _ nil)))
+  (ok {:bridge-available? (some? (r/rescue nil (requiring-resolve 'hive-mcp.knowledge-graph.edges/add-edge!)))
        :cache             (cache/cache-status)}))
 
 ;; --- Live LSP bridge handlers ------------------------------------------------

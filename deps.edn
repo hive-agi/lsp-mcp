@@ -6,7 +6,12 @@
         ;; hive-dsl — Result monad (railway-oriented error handling),
         ;; rescue/guard, lifecycle protocol
         io.github.hive-agi/hive-dsl
-        {:git/tag "v0.4.0" :git/sha "c561cb7"}
+        {:git/tag "v0.4.1" :git/sha "07ab02a"}
+
+        ;; hive-di — declarative, typed, ADT-backed config resolution
+        ;; (defconfig + env/literal sources; replaces ad-hoc env parsing)
+        io.github.hive-agi/hive-di
+        {:git/tag "v0.2.0" :git/sha "6ff3e60"}
 
         ;; hive-weave — bounded parallel execution primitives
         ;; (bounded-pmap, fork-join, safe-future, deref-safe)

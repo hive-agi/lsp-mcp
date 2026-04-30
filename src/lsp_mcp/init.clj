@@ -12,7 +12,8 @@
      (register-tools!)"
   (:require [lsp-mcp.tools :as tools]
             [lsp-mcp.cache :as cache]
-            [lsp-mcp.log :as log]))
+            [lsp-mcp.log :as log]
+            [hive-dsl.result :as r]))
 
 ;; =============================================================================
 ;; Resolution Helpers
@@ -21,9 +22,8 @@
 (defn- try-resolve
   "Attempt to resolve a fully-qualified symbol. Returns var or nil."
   [sym]
-  (try
-    (requiring-resolve sym)
-    (catch Exception _ nil)))
+  (r/rescue nil
+    (requiring-resolve sym)))
 
 ;; =============================================================================
 ;; IAddon Implementation
@@ -64,8 +64,12 @@
                                                       "namespace" {:type "string" :description "Filter by namespace"}}
                                              :description "Find references to a function"}
                               "ns-graph"    {:handler #(tools/handle-lsp (assoc % :command "ns-graph"))
-                                             :params {"project_root" {:type "string" :description "Path to the project root directory"}}
-                                             :description "Namespace dependency graph (LSP-based)"}
+                                             :params {"project_root" {:type "string" :description "Path to the project root directory"}
+                                                      "namespace"    {:type "string" :description "Optional root ns; result is BFS subgraph from here"}
+                                                      "depth"        {:type "integer" :description "BFS depth when namespace set (default 2)"}
+                                                      "max-nodes"    {:type "integer" :description "Cap on returned node count (default 100)"}
+                                                      "raw"          {:type "boolean" :description "Bypass cap; return full graph"}}
+                                             :description "Namespace dependency graph (LSP-based). Bounded by default — use :raw true for unbounded."}
                               "sync"        {:handler #(tools/handle-lsp (assoc % :command "sync"))
                                              :params {"project_root" {:type "string" :description "Path to the project root directory"}
                                                       "project_id" {:type "string" :description "Project identifier for KG sync"}
@@ -195,7 +199,12 @@
   [(tools/tool-def)])
 
 (defn init-as-addon!
-  "Register lsp-mcp as an IAddon. Falls back to legacy register-tools!."
+  "Register lsp-mcp as an IAddon. Falls back to legacy register-tools!.
+
+   The sidecar container (hive-mcp-lsp-sidecar) is a long-lived service,
+   not tied to JVM lifecycle. It persists across hive-mcp restarts so
+   the clojure-lsp analysis cache stays warm. See lsp-mcp.lifecycle for
+   the manual stop-sidecar! utility if maintenance is needed."
   []
   (if-let [result (some-> (make-addon)
                           (as-> addon (run-addon-pipeline! {:addon addon})))]
@@ -210,10 +219,9 @@
   "Check if LSP analysis backend is reachable (sidecar cache or clojure-lsp)."
   []
   (or (seq (cache/cache-status))
-      (try
+      (r/rescue false
         (requiring-resolve 'clojure-lsp.api/analyze-project-and-deps!)
-        true
-        (catch Exception _ false))))
+        true)))
 
 (defn get-addon-instance
   "Return the current IAddon instance, or nil."

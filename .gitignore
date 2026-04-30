@@ -4,3 +4,5 @@ local.config.edn
 .lsp/
 .clj-kondo/.cache/
 .claude/
+.clj-kondo/
+target/

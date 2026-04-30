@@ -2,11 +2,12 @@
   "Logging shim — delegates to timbre on JVM, stderr on babashka.
 
    Usage is identical to timbre: (log/info ...), (log/warn ...), etc.
-   Auto-detection at load time: bb? property → stderr, else try timbre.")
+   Auto-detection at load time: bb? property → stderr, else try timbre."
+  (:require [hive-dsl.result :as r]))
 
 (def ^:private use-timbre?
   (and (nil? (System/getProperty "babashka.version"))
-       (some? (try (requiring-resolve 'taoensso.timbre/info) (catch Exception _ nil)))))
+       (some? (r/rescue nil (requiring-resolve 'taoensso.timbre/info)))))
 
 (defn stderr-log [level args]
   (binding [*out* *err*]
