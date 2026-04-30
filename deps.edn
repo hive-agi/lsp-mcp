@@ -21,12 +21,12 @@
         ;; hive-system — DIP protocols + sugar for shell, fs, process
         ;; (replaces ad-hoc clojure.java.shell/sh and .getCanonicalPath)
         io.github.hive-agi/hive-system
-        {:local/root "../hive-system"}
+        {:git/tag "v0.2.2" :git/sha "53524e3"}
 
         ;; hive-help — Elm-style diagnostic message builders
         ;; (param coercion + project-level diag for sidecar pre-flight)
         io.github.hive-agi/hive-help
-        {:local/root "../hive-help"}
+        {:git/tag "v0.1.0" :git/sha "20ed760"}
 
         ;; babashka.fs — filesystem sugar (canonicalize, relativize, etc.)
         babashka/fs {:mvn/version "0.5.32"}}

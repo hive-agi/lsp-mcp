@@ -6,3 +6,4 @@ local.config.edn
 .claude/
 .clj-kondo/
 target/
+local.deps.edn
