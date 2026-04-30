@@ -11,12 +11,12 @@
         ;; hive-di — declarative, typed, ADT-backed config resolution
         ;; (defconfig + env/literal sources; replaces ad-hoc env parsing)
         io.github.hive-agi/hive-di
-        {:git/tag "v0.2.0" :git/sha "6ff3e60"}
+        {:git/tag "v0.3.1" :git/sha "ab63fd0"}
 
         ;; hive-weave — bounded parallel execution primitives
         ;; (bounded-pmap, fork-join, safe-future, deref-safe)
         io.github.hive-agi/hive-weave
-        {:git/tag "v0.2.1" :git/sha "51bed20"}
+        {:git/tag "v0.2.2" :git/sha "7aa6234"}
 
         ;; hive-system — DIP protocols + sugar for shell, fs, process
         ;; (replaces ad-hoc clojure.java.shell/sh and .getCanonicalPath)
@@ -30,6 +30,6 @@
          :extra-deps {lambdaisland/kaocha {:mvn/version "1.91.1392"}
                       org.clojure/test.check {:mvn/version "1.1.1"}
                       io.github.hive-agi/hive-test
-                      {:git/tag "v0.2.0" :git/sha "841da83"}}}
+                      {:git/tag "v0.2.1" :git/sha "48b480f"}}}
   ;; Optional: add clojure-lsp for in-process fallback (not required for cache-first mode)
   :with-lsp {:extra-deps {com.github.clojure-lsp/clojure-lsp {:mvn/version "2026.02.20-16.08.58"}}}}}
