@@ -39,12 +39,18 @@
   "Max time to wait for sidecar analysis to complete.
    Overridable via `LSP_SIDECAR_TIMEOUT_MS` env var — large projects
    (hive-knowledge, hive-mcp with 500+ forms) routinely exceed the
-   60s baseline. Invalid values fall back to 60000."
+   60s baseline. First-time scans of unfamiliar projects also need
+   extra headroom: clojure-lsp downloads transitive deps (mvn + git
+   pulls for :git/url libs), and shadow-cljs / lein classpath probes
+   add minutes on top of analysis. 5 minutes is the new default — long
+   enough for a cold-start payment-write-service with private git deps,
+   short enough that a wedged container still surfaces as an error.
+   Invalid values fall back to 300000."
   (or (try
         (some-> (System/getenv "LSP_SIDECAR_TIMEOUT_MS")
                 Long/parseLong)
         (catch NumberFormatException _ nil))
-      60000))
+      300000))
 
 (def ^:private poll-interval-ms
   "Interval between cache-ready polls."

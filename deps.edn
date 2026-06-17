@@ -6,7 +6,7 @@
         ;; hive-dsl — Result monad (railway-oriented error handling),
         ;; rescue/guard, lifecycle protocol
         io.github.hive-agi/hive-dsl
-        {:git/tag "v0.4.1" :git/sha "07ab02a"}
+        {:git/tag "v0.5.1" :git/sha "335869e"}
 
         ;; hive-di — declarative, typed, ADT-backed config resolution
         ;; (defconfig + env/literal sources; replaces ad-hoc env parsing)
@@ -16,12 +16,12 @@
         ;; hive-weave — bounded parallel execution primitives
         ;; (bounded-pmap, fork-join, safe-future, deref-safe)
         io.github.hive-agi/hive-weave
-        {:git/tag "v0.2.2" :git/sha "7aa6234"}
+        {:git/tag "v0.2.5" :git/sha "5895a2a"}
 
         ;; hive-system — DIP protocols + sugar for shell, fs, process
         ;; (replaces ad-hoc clojure.java.shell/sh and .getCanonicalPath)
         io.github.hive-agi/hive-system
-        {:git/tag "v0.2.2" :git/sha "53524e3"}
+        {:git/tag "v0.2.4" :git/sha "0706c57"}
 
         ;; hive-help — Elm-style diagnostic message builders
         ;; (param coercion + project-level diag for sidecar pre-flight)
