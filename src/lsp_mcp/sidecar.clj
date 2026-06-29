@@ -282,6 +282,57 @@
                                  "Check sidecar logs: docker logs " sidecar-container)
                  :message   (str "Timed out waiting for sidecar analysis of " project-id)}))))))))
 
+(defn refresh-analysis!
+  "Force a FRESH sidecar dump for `project-id`, defeating a present-but-stale
+   cache.
+
+   `ensure-analysis!`/`await-cache-ready` both short-circuit on any present
+   cache (even stale), so neither re-dumps after a config change. This records
+   the current meta timestamp, requests a re-dump, then polls until the on-disk
+   meta `:timestamp` ADVANCES past it (the sidecar stamps a fresh epoch-second
+   timestamp per run — reliable for any dump taking >= 1s), and finally drops
+   the in-memory parse via `cache/invalidate!` so the next read re-parses.
+
+   `project-id` must be the sidecar id (`cache/project-id-for`), not a carto
+   scope.
+
+   Returns {:refreshed? true :old-ts <s>|nil :new-ts <s>}
+        or {:error :analysis/...}."
+  [project-id]
+  (if-not (project-id-resolves? project-id)
+    (unresolvable-project-id-error project-id)
+    (let [old-ts (:timestamp (cache/read-meta project-id))
+          ready  (ensure-sidecar-running!)]
+      (if (:error ready)
+        ready
+        (let [req (request-analysis! project-id)]
+          (if (:error req)
+            req
+            (let [deadline (+ (System/currentTimeMillis) default-timeout-ms)]
+              (loop []
+                (let [m  (cache/read-meta project-id)
+                      ts (:timestamp m)]
+                  (cond
+                    (and ts (= :ok (:status m)) (or (nil? old-ts) (> ts old-ts)))
+                    (do (cache/invalidate! project-id)
+                        (log/info "Sidecar analysis refreshed for" project-id
+                                  "old-ts:" old-ts "new-ts:" ts)
+                        {:refreshed? true :old-ts old-ts :new-ts ts})
+
+                    (>= (System/currentTimeMillis) deadline)
+                    {:error   :analysis/sidecar-timeout
+                     :fix     :trigger-sidecar
+                     :command (str "docker exec " sidecar-container " kill -HUP 1")
+                     :hint    (str "Sidecar did not produce a FRESH analysis for '"
+                                   project-id "' within "
+                                   (quot default-timeout-ms 1000) "s. "
+                                   "Check sidecar logs: docker logs " sidecar-container)
+                     :old-ts  old-ts
+                     :message (str "Timed out waiting for fresh sidecar analysis of "
+                                   project-id)}
+
+                    :else (do (Thread/sleep poll-interval-ms) (recur))))))))))))
+
 (defn sidecar-running?
   "Check if the LSP sidecar container is running."
   []

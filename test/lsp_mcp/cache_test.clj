@@ -174,6 +174,23 @@
             (is (true? (:fresh? proj)))
             (is (number? (:duration-ms proj)))))))))
 
+(deftest test-invalidate!-forces-reparse
+  (testing "invalidate! drops the in-memory parse so the next read re-reads disk"
+    (with-test-cache
+      (fn [temp-dir]
+        (write-cache-files! temp-dir "inv-proj"
+                            {:dump-data {:marker :v1} :meta-data fresh-meta})
+        (is (= :v1 (:marker (cache/read-analysis "inv-proj")))
+            "first read parses v1 from disk and caches it in-memory")
+        ;; Overwrite dump.edn WITHOUT bumping the meta timestamp → the in-memory
+        ;; parse (keyed by timestamp) still serves the stale v1.
+        (spit (io/file temp-dir "inv-proj" "dump.edn") (pr-str {:marker :v2}))
+        (is (= :v1 (:marker (cache/read-analysis "inv-proj")))
+            "stale in-memory parse still served while meta timestamp unchanged")
+        (cache/invalidate! "inv-proj")
+        (is (= :v2 (:marker (cache/read-analysis "inv-proj")))
+            "after invalidate! the disk is re-parsed → v2")))))
+
 (deftest test-read-meta
   (testing "reads meta.edn correctly"
     (with-test-cache

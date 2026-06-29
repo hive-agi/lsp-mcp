@@ -194,6 +194,14 @@
            (log/debug "Cache hit for project:" project-id)
            dump))))))
 
+(defn invalidate!
+  "Drop the in-memory parsed analysis for `project-id` so the next
+   `read-analysis` re-parses from disk. The on-disk dump is untouched.
+   Use after a config change forces a fresh sidecar dump."
+  [project-id]
+  (swap! parsed-dump-cache dissoc project-id)
+  nil)
+
 (defn list-cached-projects
   "List all project-ids with cached analysis in the cache directory."
   []

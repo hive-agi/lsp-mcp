@@ -45,3 +45,43 @@
         ;; Without the sentinel exception this would short-circuit on
         ;; the unresolvable guard and never touch the sidecar layer.
         (is (= :sidecar-checked @seen))))))
+
+;; -----------------------------------------------------------------------------
+;; refresh-analysis! — forces a FRESH dump, defeating the present-but-stale cache
+;;
+;; ensure-analysis!/await-cache-ready both return on any present cache (even
+;; stale), so neither re-dumps after a config change. refresh-analysis! must
+;; poll until the on-disk meta timestamp ADVANCES, then invalidate the in-mem
+;; parse. The "workspace" sentinel resolves without a real host dir.
+
+(deftest refresh-analysis!-waits-for-timestamp-advance
+  (testing "polls until meta timestamp advances, then invalidates the in-mem cache"
+    (let [metas       (atom [{:timestamp 100 :status :ok}    ; old-ts (pre-loop read)
+                             {:timestamp 200 :status :ok}])  ; loop read → advanced
+          invalidated (atom nil)]
+      (with-redefs [cache/read-meta (fn [_]
+                                       (let [m (first @metas)]
+                                         (when (next @metas) (swap! metas rest))
+                                         m))
+                    sidecar/ensure-sidecar-running! (fn [] {:ok true})
+                    sidecar/request-analysis!       (fn [_] {:requested true})
+                    cache/invalidate!               (fn [pid] (reset! invalidated pid))]
+        (let [r (sidecar/refresh-analysis! "workspace")]
+          (is (:refreshed? r))
+          (is (= 100 (:old-ts r)))
+          (is (= 200 (:new-ts r)))
+          (is (= "workspace" @invalidated) "in-mem parse invalidated for the project"))))))
+
+(deftest refresh-analysis!-propagates-sidecar-unavailable
+  (testing "returns the ensure-sidecar-running! error without polling"
+    (with-redefs [cache/read-meta (fn [_] {:timestamp 100 :status :ok})
+                  sidecar/ensure-sidecar-running! (fn [] {:error :analysis/sidecar-unavailable
+                                                          :message "down"})]
+      (let [r (sidecar/refresh-analysis! "workspace")]
+        (is (= :analysis/sidecar-unavailable (:error r)))))))
+
+(deftest refresh-analysis!-fails-fast-on-unresolvable-id
+  (testing "bogus project-id returns ELM error without touching the sidecar"
+    (with-redefs [cache/workspace-root (fn [] "/strictly-isolated-ws")]
+      (let [r (sidecar/refresh-analysis! "/no/such/project")]
+        (is (= :analysis/unresolvable-project-id (:error r)))))))
