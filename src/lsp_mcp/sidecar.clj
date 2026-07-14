@@ -179,20 +179,72 @@
       (log/error "Failed to request sidecar analysis:" (ex-message e))
       {:error (str "sidecar request failed: " (ex-message e))})))
 
+(defn- analysis-generation
+  "Return the sidecar generation token carried by meta.edn.
+
+   New sidecars stamp :completed-at-ms. The remaining fields keep this
+   compatible with older cache rows and with unit-test stubs."
+  [meta]
+  (when meta
+    (select-keys meta [:completed-at-ms :timestamp :status :duration-ms :exit-code])))
+
+(defn- dump-failed-result
+  "Translate terminal sidecar metadata into an actionable Result error."
+  [project-id meta]
+  (let [log-path (str (cache/cache-dir) "/" project-id "/dump.log")]
+    {:error      :analysis/sidecar-dump-failed
+     :fix        :inspect-sidecar-log
+     :project-id project-id
+     :exit-code  (:exit-code meta)
+     :log-path   log-path
+     :command    (str "sed -n '1,240p' " log-path)
+     :hint       (str "clojure-lsp failed for '" project-id
+                      "'. Inspect its dump log; classpath or dependency resolution "
+                      "is the usual cause.")
+     :message    (str "Sidecar analysis failed for " project-id
+                      " with exit code " (:exit-code meta))}))
+
 (defn await-cache-ready
-  "Poll cache directory until analysis is available for project-id.
-   Returns cached analysis map or nil on timeout."
+  "Wait for a sidecar generation newer than baseline-generation.
+
+   Returns {:ok analysis} for a completed dump, a structured error for a
+   terminal failed dump, or nil only when no terminal generation arrives
+   before timeout. The 1/2-arity compatibility paths accept any current
+   generation; request callers should use the 3-arity form."
   ([project-id]
-   (await-cache-ready project-id default-timeout-ms))
+   (await-cache-ready project-id nil default-timeout-ms))
   ([project-id timeout-ms]
+   (await-cache-ready project-id nil timeout-ms))
+  ([project-id baseline-generation timeout-ms]
    (let [deadline (+ (System/currentTimeMillis) timeout-ms)]
      (loop []
-       (when (< (System/currentTimeMillis) deadline)
-         (if-let [data (cache/read-analysis project-id {:ignore-staleness true})]
-           (do (log/info "Sidecar analysis ready for" project-id)
-               data)
-           (do (Thread/sleep poll-interval-ms)
-               (recur))))))))
+       (if (>= (System/currentTimeMillis) deadline)
+         nil
+         (let [meta       (cache/read-meta project-id)
+               generation (analysis-generation meta)]
+           (cond
+             (= generation baseline-generation)
+             (do (Thread/sleep poll-interval-ms)
+                 (recur))
+
+             (= :error (:status meta))
+             (dump-failed-result project-id meta)
+
+             (= :ok (:status meta))
+             (do
+               (cache/invalidate! project-id)
+               (if-let [data (cache/read-analysis project-id {:ignore-staleness true})]
+                 (do (log/info "Sidecar analysis ready for" project-id)
+                     {:ok data})
+                 {:error      :analysis/sidecar-cache-invalid
+                  :fix        :inspect-sidecar-log
+                  :project-id project-id
+                  :message    (str "Sidecar marked analysis successful for "
+                                   project-id " but no readable dump exists")}))
+
+             :else
+             (do (Thread/sleep poll-interval-ms)
+                 (recur)))))))))
 
 ;; =============================================================================
 ;; Orchestrator
@@ -241,97 +293,71 @@
 (defn ensure-analysis!
   "Ensure analysis is available for project-id.
 
-   Strategy:
-   1. Check cache (fast path)
-   2. Validate project-id resolves to a host dir under workspace
-   3. Auto-start sidecar if not running (lazy spawn)
-   4. Request sidecar analysis + await
-   5. Return analysis map or structured error
-
-   Returns:
-     {:ok analysis-map}   on success
-     {:error :analysis/unresolvable-project-id ...} when project-id has no host dir
-     {:error :analysis/sidecar-timeout :fix :trigger-sidecar ...} on timeout
-     {:error :analysis/sidecar-unavailable ...} on request/start failure"
+   Fresh cache hits return immediately. Cache misses request a new sidecar
+   generation and distinguish terminal dump failures from genuine timeouts."
   [project-id]
-  ;; Fast path: cache already has it (even for now-stale project-ids).
   (if-let [cached (cache/read-analysis project-id)]
     {:ok cached}
     (if-not (project-id-resolves? project-id)
-      ;; Fail fast — would otherwise burn the 60s await-cache-ready timeout.
       (unresolvable-project-id-error project-id)
-      ;; Slow path: ensure sidecar is up, then trigger
       (let [ready (ensure-sidecar-running!)]
         (if (:error ready)
           ready
-          (let [req-result (request-analysis! project-id)]
+          (let [baseline   (analysis-generation (cache/read-meta project-id))
+                req-result (request-analysis! project-id)]
             (if (:error req-result)
               {:error   :analysis/sidecar-unavailable
                :fix     :start-sidecar
                :command "docker compose up -d lsp-sidecar"
                :hint    "LSP sidecar container not reachable. Start it with docker compose."
                :message (:error req-result)}
-              ;; Await cache population
-              (if-let [data (await-cache-ready project-id)]
-                {:ok data}
-                {:error     :analysis/sidecar-timeout
-                 :fix       :trigger-sidecar
-                 :command   (str "docker exec " sidecar-container " kill -HUP 1")
-                 :hint      (str "Sidecar did not produce analysis for '" project-id
-                                 "' within " (quot default-timeout-ms 1000) "s. "
+              (or (await-cache-ready project-id baseline default-timeout-ms)
+                  {:error   :analysis/sidecar-timeout
+                   :fix     :trigger-sidecar
+                   :command (str "docker exec " sidecar-container " kill -HUP 1")
+                   :hint    (str "Sidecar produced no terminal generation for '"
+                                 project-id "' within "
+                                 (quot default-timeout-ms 1000) "s. "
                                  "Check sidecar logs: docker logs " sidecar-container)
-                 :message   (str "Timed out waiting for sidecar analysis of " project-id)}))))))))
+                   :message (str "Timed out waiting for sidecar analysis of "
+                                 project-id)}))))))))
 
 (defn refresh-analysis!
-  "Force a FRESH sidecar dump for `project-id`, defeating a present-but-stale
-   cache.
+  "Force a fresh sidecar generation for project-id.
 
-   `ensure-analysis!`/`await-cache-ready` both short-circuit on any present
-   cache (even stale), so neither re-dumps after a config change. This records
-   the current meta timestamp, requests a re-dump, then polls until the on-disk
-   meta `:timestamp` ADVANCES past it (the sidecar stamps a fresh epoch-second
-   timestamp per run — reliable for any dump taking >= 1s), and finally drops
-   the in-memory parse via `cache/invalidate!` so the next read re-parses.
-
-   `project-id` must be the sidecar id (`cache/project-id-for`), not a carto
-   scope.
-
-   Returns {:refreshed? true :old-ts <s>|nil :new-ts <s>}
-        or {:error :analysis/...}."
+   Waits for a generation token change, returns terminal dump failures
+   immediately, and invalidates the parsed cache before reading the new dump."
   [project-id]
   (if-not (project-id-resolves? project-id)
     (unresolvable-project-id-error project-id)
-    (let [old-ts (:timestamp (cache/read-meta project-id))
-          ready  (ensure-sidecar-running!)]
+    (let [old-meta (cache/read-meta project-id)
+          baseline (analysis-generation old-meta)
+          ready    (ensure-sidecar-running!)]
       (if (:error ready)
         ready
         (let [req (request-analysis! project-id)]
           (if (:error req)
             req
-            (let [deadline (+ (System/currentTimeMillis) default-timeout-ms)]
-              (loop []
-                (let [m  (cache/read-meta project-id)
-                      ts (:timestamp m)]
-                  (cond
-                    (and ts (= :ok (:status m)) (or (nil? old-ts) (> ts old-ts)))
-                    (do (cache/invalidate! project-id)
-                        (log/info "Sidecar analysis refreshed for" project-id
-                                  "old-ts:" old-ts "new-ts:" ts)
-                        {:refreshed? true :old-ts old-ts :new-ts ts})
-
-                    (>= (System/currentTimeMillis) deadline)
-                    {:error   :analysis/sidecar-timeout
-                     :fix     :trigger-sidecar
-                     :command (str "docker exec " sidecar-container " kill -HUP 1")
-                     :hint    (str "Sidecar did not produce a FRESH analysis for '"
-                                   project-id "' within "
-                                   (quot default-timeout-ms 1000) "s. "
-                                   "Check sidecar logs: docker logs " sidecar-container)
-                     :old-ts  old-ts
-                     :message (str "Timed out waiting for fresh sidecar analysis of "
-                                   project-id)}
-
-                    :else (do (Thread/sleep poll-interval-ms) (recur))))))))))))
+            (if-let [outcome (await-cache-ready project-id baseline default-timeout-ms)]
+              (if (:ok outcome)
+                (let [new-meta (cache/read-meta project-id)]
+                  (log/info "Sidecar analysis refreshed for" project-id
+                            "old-ts:" (:timestamp old-meta)
+                            "new-ts:" (:timestamp new-meta))
+                  {:refreshed? true
+                   :old-ts     (:timestamp old-meta)
+                   :new-ts     (:timestamp new-meta)})
+                outcome)
+              {:error   :analysis/sidecar-timeout
+               :fix     :trigger-sidecar
+               :command (str "docker exec " sidecar-container " kill -HUP 1")
+               :hint    (str "Sidecar produced no fresh terminal generation for '"
+                             project-id "' within "
+                             (quot default-timeout-ms 1000) "s. "
+                             "Check sidecar logs: docker logs " sidecar-container)
+               :old-ts  (:timestamp old-meta)
+               :message (str "Timed out waiting for fresh sidecar analysis of "
+                             project-id)})))))))
 
 (defn sidecar-running?
   "Check if the LSP sidecar container is running."
