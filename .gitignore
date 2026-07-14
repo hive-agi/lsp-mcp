@@ -7,3 +7,5 @@ local.config.edn
 .clj-kondo/
 target/
 local.deps.edn
+.clj-kondo/imports/
+.lsp/.cache/
