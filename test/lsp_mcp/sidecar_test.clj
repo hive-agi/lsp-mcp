@@ -55,14 +55,15 @@
 ;; parse. The "workspace" sentinel resolves without a real host dir.
 
 (deftest refresh-analysis!-waits-for-timestamp-advance
-  (testing "polls until meta timestamp advances, then invalidates the in-mem cache"
-    (let [metas       (atom [{:timestamp 100 :status :ok}    ; old-ts (pre-loop read)
-                             {:timestamp 200 :status :ok}])  ; loop read → advanced
+  (testing "polls until meta generation advances, then invalidates the in-mem cache"
+    (let [metas       (atom [{:timestamp 100 :status :ok}
+                             {:timestamp 200 :status :ok}])
           invalidated (atom nil)]
       (with-redefs [cache/read-meta (fn [_]
-                                       (let [m (first @metas)]
-                                         (when (next @metas) (swap! metas rest))
-                                         m))
+                                      (let [m (first @metas)]
+                                        (when (next @metas) (swap! metas rest))
+                                        m))
+                    cache/read-analysis (fn [_ _] {:fresh true})
                     sidecar/ensure-sidecar-running! (fn [] {:ok true})
                     sidecar/request-analysis!       (fn [_] {:requested true})
                     cache/invalidate!               (fn [pid] (reset! invalidated pid))]
@@ -70,7 +71,40 @@
           (is (:refreshed? r))
           (is (= 100 (:old-ts r)))
           (is (= 200 (:new-ts r)))
-          (is (= "workspace" @invalidated) "in-mem parse invalidated for the project"))))))
+          (is (= "workspace" @invalidated)
+              "in-mem parse invalidated for the project"))))))
+
+(deftest await-cache-ready-surfaces-terminal-dump-error
+  (testing "a fresh error generation returns immediately instead of timing out"
+    (with-redefs [cache/read-meta (fn [_]
+                                   {:timestamp 101
+                                    :completed-at-ms 101000
+                                    :status :error
+                                    :exit-code 17})
+                  cache/cache-dir (fn [] "/tmp/hive-lsp-test")]
+      (let [result (sidecar/await-cache-ready
+                    "hive/broken"
+                    {:timestamp 100 :status :ok}
+                    100)]
+        (is (= :analysis/sidecar-dump-failed (:error result)))
+        (is (= 17 (:exit-code result)))
+        (is (str/includes? (:log-path result) "hive/broken/dump.log"))))))
+
+(deftest await-cache-ready-reads-only-new-success-generation
+  (testing "a new ok generation invalidates stale parsed data before reading"
+    (let [invalidated (atom nil)]
+      (with-redefs [cache/read-meta (fn [_]
+                                     {:timestamp 101
+                                      :completed-at-ms 101000
+                                      :status :ok})
+                    cache/invalidate! (fn [pid] (reset! invalidated pid))
+                    cache/read-analysis (fn [_ _] {:fresh true})]
+        (let [result (sidecar/await-cache-ready
+                      "hive/ready"
+                      {:timestamp 100 :status :ok}
+                      100)]
+          (is (= {:ok {:fresh true}} result))
+          (is (= "hive/ready" @invalidated)))))))
 
 (deftest refresh-analysis!-propagates-sidecar-unavailable
   (testing "returns the ensure-sidecar-running! error without polling"
