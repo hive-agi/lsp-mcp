@@ -6,35 +6,41 @@
         ;; hive-dsl — Result monad (railway-oriented error handling),
         ;; rescue/guard, lifecycle protocol
         io.github.hive-agi/hive-dsl
-        {:git/tag "v0.5.2" :git/sha "8d9760c"}
+        {:mvn/version "0.5.2"}
 
         ;; hive-di — declarative, typed, ADT-backed config resolution
         ;; (defconfig + env/literal sources; replaces ad-hoc env parsing)
         io.github.hive-agi/hive-di
-        {:git/tag "v0.3.1" :git/sha "ab63fd0"}
+        {:mvn/version "0.3.1"}
 
         ;; hive-weave — bounded parallel execution primitives
         ;; (bounded-pmap, fork-join, safe-future, deref-safe)
         io.github.hive-agi/hive-weave
-        {:git/tag "v0.2.5" :git/sha "5895a2a"}
+        {:mvn/version "0.2.5"}
 
         ;; hive-system — DIP protocols + sugar for shell, fs, process
         ;; (replaces ad-hoc clojure.java.shell/sh and .getCanonicalPath)
         io.github.hive-agi/hive-system
-        {:git/tag "v0.2.7" :git/sha "dbbfeff"}
+        {:mvn/version "0.2.7"}
 
         ;; hive-help — Elm-style diagnostic message builders
         ;; (param coercion + project-level diag for sidecar pre-flight)
         io.github.hive-agi/hive-help
-        {:git/tag "v0.1.0" :git/sha "20ed760"}
+        {:mvn/version "0.1.0"}
 
         ;; babashka.fs — filesystem sugar (canonicalize, relativize, etc.)
         babashka/fs {:mvn/version "0.5.32"}}
  :aliases
- {:test {:extra-paths ["test"]
+ {
+  ;; :build — tools.build entrypoint (clojure -T:build <task>). Canonical hive
+  ;; build: jar / jar-aot / install / bump / verify-license / deploy.
+  :build {:deps {io.github.clojure/tools.build {:mvn/version "0.10.9"}
+                 slipset/deps-deploy {:mvn/version "0.2.2"}}
+          :ns-default build}
+:test {:extra-paths ["test"]
          :extra-deps {lambdaisland/kaocha {:mvn/version "1.91.1392"}
                       org.clojure/test.check {:mvn/version "1.1.1"}
                       io.github.hive-agi/hive-test
-                      {:git/tag "v0.3.0" :git/sha "763e4bc"}}}
+                      {:mvn/version "0.3.6"}}}
   ;; Optional: add clojure-lsp for in-process fallback (not required for cache-first mode)
   :with-lsp {:extra-deps {com.github.clojure-lsp/clojure-lsp {:mvn/version "2026.02.20-16.08.58"}}}}}
