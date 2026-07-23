@@ -64,6 +64,14 @@
   "Interval between sidecar-running? polls during auto-start."
   500)
 
+(def ^:private heartbeat-timeout-ms
+  "A running container without a recent worker heartbeat is degraded."
+  (or (try
+        (some-> (System/getenv "LSP_SIDECAR_HEARTBEAT_TIMEOUT_MS")
+                Long/parseLong)
+        (catch NumberFormatException _ nil))
+      30000))
+
 ;; =============================================================================
 ;; Sidecar Auto-Start (readiness + lazy spawn)
 ;; =============================================================================
@@ -153,40 +161,168 @@
   []
   (str (cache/cache-dir) "/_request.edn"))
 
+(defn- job-file-path
+  [project-id]
+  (str (cache/cache-dir) "/" project-id "/job.edn"))
+
+(defn- cancel-file-path
+  [project-id]
+  (str (cache/cache-dir) "/" project-id "/cancel.edn"))
+
+(defn- atomic-write-edn!
+  "Replace an EDN state file atomically so readers never observe partial data."
+  [path value]
+  (let [target (.toPath (io/file path))
+        parent (.getParent target)]
+    (java.nio.file.Files/createDirectories
+     parent
+     (make-array java.nio.file.attribute.FileAttribute 0))
+    (let [temp (java.nio.file.Files/createTempFile
+                parent
+                ".lsp-mcp-"
+                ".tmp"
+                (make-array java.nio.file.attribute.FileAttribute 0))]
+      (try
+        (spit (.toFile temp) (pr-str value))
+        (try
+          (java.nio.file.Files/move
+           temp target
+           (into-array
+            java.nio.file.CopyOption
+            [java.nio.file.StandardCopyOption/ATOMIC_MOVE
+             java.nio.file.StandardCopyOption/REPLACE_EXISTING]))
+          (catch java.nio.file.AtomicMoveNotSupportedException _
+            (java.nio.file.Files/move
+             temp target
+             (into-array
+              java.nio.file.CopyOption
+              [java.nio.file.StandardCopyOption/REPLACE_EXISTING]))))
+        value
+        (finally
+          (java.nio.file.Files/deleteIfExists temp))))))
+
+(defonce ^:private request-lock
+  (Object.))
+
 (defn request-analysis!
-  "Write project-id to sidecar request file and signal via SIGHUP.
-   Returns {:requested true :project-id pid} or {:error str}."
+  "Queue a sidecar analysis and persist its observable lifecycle."
   [project-id]
   (try
-    (let [req-file (io/file (request-file-path))]
-      ;; Ensure cache dir exists
-      (.mkdirs (.getParentFile req-file))
-      ;; Append project-id (sidecar reads one per line)
-      (spit req-file (str project-id "\n") :append true)
-      (log/info "Wrote sidecar request for" project-id)
-      ;; Signal sidecar to process immediately (via hive-system IShell)
-      (let [result (sh/exec! ["docker" "exec" sidecar-container "kill" "-HUP" "1"])
-            {:keys [exit stderr]} (:ok result)]
+    (let [request-file (io/file (request-file-path))
+          job-id       (str (java.util.UUID/randomUUID))
+          queued-at-ms (System/currentTimeMillis)
+          job           {:job-id job-id
+                         :project-id project-id
+                         :status :queued
+                         :queued-at-ms queued-at-ms}]
+      (.mkdirs (.getParentFile request-file))
+      (java.nio.file.Files/deleteIfExists
+       (.toPath (io/file (cancel-file-path project-id))))
+      (atomic-write-edn! (job-file-path project-id) job)
+      (locking request-lock
+        (spit request-file (str project-id "\n") :append true))
+      (log/info "Queued sidecar job" job-id "for" project-id)
+      (let [result (sh/exec! ["docker" "exec" sidecar-container
+                              "kill" "-HUP" "1"])
+            {:keys [exit stderr]} (:ok result)
+            response (assoc job :requested true)]
         (if (and (r/ok? result) (zero? (or exit -1)))
-          (do (log/info "Sent SIGHUP to sidecar")
-              {:requested true :project-id project-id})
-          (do (log/warn "SIGHUP failed (sidecar may not be running):"
-                        (or stderr (:err result)))
-              ;; Request file still written — sidecar will pick up on next loop
-              {:requested true :project-id project-id
-               :warning   "SIGHUP failed, sidecar will process on next cycle"}))))
+          (do
+            (log/info "Sent SIGHUP to sidecar")
+            response)
+          (do
+            (log/warn "SIGHUP failed (sidecar will poll the queue):"
+                      (or stderr (:err result)))
+            (assoc response
+                   :warning "SIGHUP failed, sidecar will process on next cycle")))))
     (catch Exception e
       (log/error "Failed to request sidecar analysis:" (ex-message e))
       {:error (str "sidecar request failed: " (ex-message e))})))
 
-(defn- analysis-generation
-  "Return the sidecar generation token carried by meta.edn.
+(def ^:private terminal-job-statuses
+  #{:ok :error :cancelled})
 
-   New sidecars stamp :completed-at-ms. The remaining fields keep this
-   compatible with older cache rows and with unit-test stubs."
+(defn job-status
+  "Return the latest persisted job, optionally requiring a matching job-id."
+  ([project-id]
+   (job-status project-id nil))
+  ([project-id expected-job-id]
+   (let [job (cache/read-job project-id)]
+     (cond
+       (nil? job)
+       {:error :analysis/job-not-found
+        :project-id project-id
+        :message (str "No sidecar job exists for " project-id)}
+
+       (and expected-job-id
+            (not= expected-job-id (:job-id job)))
+       {:error :analysis/job-mismatch
+        :project-id project-id
+        :job-id expected-job-id
+        :current-job-id (:job-id job)
+        :message "Requested job-id is no longer current"}
+
+       :else job))))
+
+(defn cancel-analysis!
+  "Request cancellation for the current queued or running sidecar job."
+  ([project-id]
+   (cancel-analysis! project-id nil))
+  ([project-id expected-job-id]
+   (let [job (cache/read-job project-id)]
+     (cond
+       (nil? job)
+       {:error :analysis/job-not-found
+        :project-id project-id
+        :message (str "No sidecar job exists for " project-id)}
+
+       (and expected-job-id
+            (not= expected-job-id (:job-id job)))
+       {:error :analysis/job-mismatch
+        :project-id project-id
+        :job-id expected-job-id
+        :current-job-id (:job-id job)
+        :message "Refusing to cancel a superseded job"}
+
+       (terminal-job-statuses (:status job))
+       {:error :analysis/job-terminal
+        :project-id project-id
+        :job-id (:job-id job)
+        :status (:status job)
+        :message "Sidecar job is already terminal"}
+
+       :else
+       (let [requested-at-ms (System/currentTimeMillis)
+             marker {:job-id (:job-id job)
+                     :project-id project-id
+                     :requested-at-ms requested-at-ms}
+             updated (assoc job
+                            :status :cancelling
+                            :cancel-requested-at-ms requested-at-ms)
+             _ (atomic-write-edn! (job-file-path project-id) updated)
+             _ (atomic-write-edn! (cancel-file-path project-id) marker)
+             worker-pid (:worker-pid job)
+             kill-result
+             (when worker-pid
+               (sh/exec! ["docker" "exec" sidecar-container
+                          "kill" "-TERM" (str worker-pid)]))
+             kill-failed?
+             (and kill-result
+                  (or (not (r/ok? kill-result))
+                      (not (zero? (or (get-in kill-result [:ok :exit])
+                                      -1)))))]
+         (cond-> (assoc updated :cancel-requested true)
+           kill-failed?
+           (assoc :warning
+                  "Cancellation marker written; worker signal failed")))))))
+
+(defn- analysis-generation
+  "Return the sidecar generation token carried by meta.edn."
   [meta]
   (when meta
-    (select-keys meta [:completed-at-ms :timestamp :status :duration-ms :exit-code])))
+    (select-keys meta
+                 [:job-id :completed-at-ms :timestamp :status
+                  :duration-ms :exit-code])))
 
 (defn- dump-failed-result
   "Translate terminal sidecar metadata into an actionable Result error."
@@ -204,13 +340,19 @@
      :message    (str "Sidecar analysis failed for " project-id
                       " with exit code " (:exit-code meta))}))
 
+(defn- cancelled-result
+  [project-id meta]
+  {:error :analysis/sidecar-cancelled
+   :project-id project-id
+   :job-id (:job-id meta)
+   :status :cancelled
+   :message (str "Sidecar analysis was cancelled for " project-id)})
+
 (defn await-cache-ready
   "Wait for a sidecar generation newer than baseline-generation.
 
-   Returns {:ok analysis} for a completed dump, a structured error for a
-   terminal failed dump, or nil only when no terminal generation arrives
-   before timeout. The 1/2-arity compatibility paths accept any current
-   generation; request callers should use the 3-arity form."
+   Returns {:ok analysis} for a completed dump, a structured terminal error,
+   or nil when no terminal generation arrives before timeout."
   ([project-id]
    (await-cache-ready project-id nil default-timeout-ms))
   ([project-id timeout-ms]
@@ -224,8 +366,12 @@
                generation (analysis-generation meta)]
            (cond
              (= generation baseline-generation)
-             (do (Thread/sleep poll-interval-ms)
-                 (recur))
+             (do
+               (Thread/sleep poll-interval-ms)
+               (recur))
+
+             (= :cancelled (:status meta))
+             (cancelled-result project-id meta)
 
              (= :error (:status meta))
              (dump-failed-result project-id meta)
@@ -233,18 +379,23 @@
              (= :ok (:status meta))
              (do
                (cache/invalidate! project-id)
-               (if-let [data (cache/read-analysis project-id {:ignore-staleness true})]
-                 (do (log/info "Sidecar analysis ready for" project-id)
-                     {:ok data})
-                 {:error      :analysis/sidecar-cache-invalid
-                  :fix        :inspect-sidecar-log
+               (if-let [data (cache/read-analysis
+                              project-id
+                              {:ignore-staleness true})]
+                 (do
+                   (log/info "Sidecar analysis ready for" project-id)
+                   {:ok data})
+                 {:error :analysis/sidecar-cache-invalid
+                  :fix :inspect-sidecar-log
                   :project-id project-id
-                  :message    (str "Sidecar marked analysis successful for "
-                                   project-id " but no readable dump exists")}))
+                  :message (str "Sidecar marked analysis successful for "
+                                project-id
+                                " but no readable dump exists")}))
 
              :else
-             (do (Thread/sleep poll-interval-ms)
-                 (recur)))))))))
+             (do
+               (Thread/sleep poll-interval-ms)
+               (recur)))))))))
 
 ;; =============================================================================
 ;; Orchestrator
@@ -369,3 +520,30 @@
       (and (r/ok? result)
            (zero? (or exit -1))
            (= "true" (str/trim (or stdout "")))))))
+
+(defn health
+  "Report functional worker health, not merely container process state."
+  []
+  (let [container-running? (sidecar-running?)
+        heartbeat          (cache/read-sidecar-health)
+        heartbeat-at-ms    (:heartbeat-at-ms heartbeat)
+        heartbeat-age-ms   (when (number? heartbeat-at-ms)
+                             (max 0 (- (System/currentTimeMillis)
+                                       heartbeat-at-ms)))
+        heartbeat-fresh?   (and heartbeat-age-ms
+                                (<= heartbeat-age-ms
+                                    heartbeat-timeout-ms))
+        inventory          (cache/cache-status)
+        status             (cond
+                             (not container-running?) :down
+                             (not heartbeat-fresh?) :degraded
+                             (not= :ok (:status heartbeat)) :degraded
+                             :else :ok)]
+    {:status status
+     :functional? (= :ok status)
+     :container-running? container-running?
+     :heartbeat heartbeat
+     :heartbeat-age-ms heartbeat-age-ms
+     :heartbeat-timeout-ms heartbeat-timeout-ms
+     :queue (:queue inventory)
+     :cached-projects (count (:projects inventory))}))

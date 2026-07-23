@@ -2,7 +2,9 @@
   (:require [clojure.string :as str]
             [clojure.test :refer [deftest is testing]]
             [lsp-mcp.cache :as cache]
-            [lsp-mcp.sidecar :as sidecar]))
+            [lsp-mcp.sidecar :as sidecar]
+            [clojure.java.io :as io]
+            [hive-system.shell.core :as sh]))
 
 ;; -----------------------------------------------------------------------------
 ;; ensure-analysis! — unresolvable project-id guard
@@ -11,6 +13,93 @@
 ;; the host. If that path is not a real directory, clojure-lsp inside
 ;; the container has nothing to dump, the cache never populates, and
 ;; await-cache-ready burns the full 60s timeout. We fail fast instead.
+
+(defn- with-temp-cache
+  [f]
+  (let [directory (java.io.File/createTempFile "sidecar-test" "")]
+    (.delete directory)
+    (.mkdirs directory)
+    (try
+      (with-redefs [cache/cache-dir (constantly (.getAbsolutePath directory))]
+        (f directory))
+      (finally
+        (doseq [file (reverse (file-seq directory))]
+          (.delete ^java.io.File file))))))
+
+(deftest request-analysis!-persists-queued-job
+  (testing "request identity and queued timestamp are visible before worker pickup"
+    (with-temp-cache
+      (fn [directory]
+        (with-redefs [sh/exec! (fn [_] {:ok {:exit 0}})]
+          (let [request (sidecar/request-analysis! "hive/demo")
+                job (cache/read-job "hive/demo")]
+            (is (:requested request))
+            (is (= :queued (:status request)))
+            (is (= (:job-id request) (:job-id job)))
+            (is (number? (:queued-at-ms job)))
+            (is (= "hive/demo
+"
+                   (slurp (io/file directory "_request.edn"))))))))))
+
+(deftest cancel-analysis!-marks-and-signals-running-job
+  (testing "cancellation is durable and signals the exact worker process"
+    (with-temp-cache
+      (fn [directory]
+        (let [project-id "hive/demo"
+              project-dir (io/file directory project-id)
+              commands (atom [])]
+          (.mkdirs project-dir)
+          (spit (io/file project-dir "job.edn")
+                (pr-str {:job-id "job-1"
+                         :project-id project-id
+                         :status :running
+                         :worker-pid 42}))
+          (with-redefs [sh/exec! (fn [command]
+                                   (swap! commands conj command)
+                                   {:ok {:exit 0}})]
+            (let [result (sidecar/cancel-analysis! project-id "job-1")]
+              (is (:cancel-requested result))
+              (is (= :cancelling (:status (cache/read-job project-id))))
+              (is (str/includes?
+                   (slurp (io/file project-dir "cancel.edn"))
+                   "job-1"))
+              (is (= ["docker" "exec" "hive-mcp-lsp-sidecar"
+                      "kill" "-TERM" "42"]
+                     (first @commands))))))))))
+
+(deftest health-requires-a-live-worker-heartbeat
+  (testing "running container plus current heartbeat is functional"
+    (with-redefs [sidecar/sidecar-running? (constantly true)
+                  cache/read-sidecar-health
+                  (constantly {:status :ok
+                               :heartbeat-at-ms (System/currentTimeMillis)})
+                  cache/cache-status
+                  (constantly {:queue {:queued 0}
+                               :projects [{:project-id "hive/demo"}]})]
+      (let [health (sidecar/health)]
+        (is (= :ok (:status health)))
+        (is (:functional? health))
+        (is (= 1 (:cached-projects health))))))
+  (testing "running container with stale heartbeat is degraded"
+    (with-redefs [sidecar/sidecar-running? (constantly true)
+                  cache/read-sidecar-health
+                  (constantly {:status :ok
+                               :heartbeat-at-ms
+                               (- (System/currentTimeMillis) 60000)})
+                  cache/cache-status
+                  (constantly {:queue {} :projects []})]
+      (let [health (sidecar/health)]
+        (is (= :degraded (:status health)))
+        (is (false? (:functional? health))))))
+  (testing "a fresh shutdown heartbeat is still degraded"
+    (with-redefs [sidecar/sidecar-running? (constantly true)
+                  cache/read-sidecar-health
+                  (constantly {:status :down
+                               :heartbeat-at-ms
+                               (System/currentTimeMillis)})
+                  cache/cache-status
+                  (constantly {:queue {} :projects []})]
+      (is (= :degraded (:status (sidecar/health)))))))
 
 (deftest ensure-analysis!-unresolvable-project-id-fails-fast
   (testing "bogus project-id returns ELM error without invoking sidecar"
@@ -77,10 +166,10 @@
 (deftest await-cache-ready-surfaces-terminal-dump-error
   (testing "a fresh error generation returns immediately instead of timing out"
     (with-redefs [cache/read-meta (fn [_]
-                                   {:timestamp 101
-                                    :completed-at-ms 101000
-                                    :status :error
-                                    :exit-code 17})
+                                    {:timestamp 101
+                                     :completed-at-ms 101000
+                                     :status :error
+                                     :exit-code 17})
                   cache/cache-dir (fn [] "/tmp/hive-lsp-test")]
       (let [result (sidecar/await-cache-ready
                     "hive/broken"
@@ -90,13 +179,29 @@
         (is (= 17 (:exit-code result)))
         (is (str/includes? (:log-path result) "hive/broken/dump.log"))))))
 
+(deftest await-cache-ready-surfaces-cancellation
+  (testing "a fresh cancelled generation terminates the wait honestly"
+    (with-redefs [cache/read-meta (fn [_]
+                                    {:job-id "job-2"
+                                     :completed-at-ms 102000
+                                     :status :cancelled})]
+      (let [result (sidecar/await-cache-ready
+                    "hive/cancelled"
+                    {:job-id "job-1"
+                     :completed-at-ms 101000
+                     :status :ok}
+                    100)]
+        (is (= :analysis/sidecar-cancelled (:error result)))
+        (is (= "job-2" (:job-id result)))
+        (is (= :cancelled (:status result)))))))
+
 (deftest await-cache-ready-reads-only-new-success-generation
   (testing "a new ok generation invalidates stale parsed data before reading"
     (let [invalidated (atom nil)]
       (with-redefs [cache/read-meta (fn [_]
-                                     {:timestamp 101
-                                      :completed-at-ms 101000
-                                      :status :ok})
+                                      {:timestamp 101
+                                       :completed-at-ms 101000
+                                       :status :ok})
                     cache/invalidate! (fn [pid] (reset! invalidated pid))
                     cache/read-analysis (fn [_ _] {:fresh true})]
         (let [result (sidecar/await-cache-ready

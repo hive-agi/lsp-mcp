@@ -18,7 +18,8 @@
             [lsp-mcp.bridge :as bridge]
             [lsp-mcp.cache :as cache]
             [lsp-mcp.core :as core]
-            [lsp-mcp.log :as log]))
+            [lsp-mcp.log :as log]
+            [lsp-mcp.sidecar :as sidecar]))
 
 ;; =============================================================================
 ;; Request-Level Memoization (30s TTL)
@@ -218,8 +219,32 @@
     (core/analyze-and-sync! project_root project_id scope)))
 
 (defn- h-status [_]
-  (ok {:bridge-available? (some? (r/rescue nil (requiring-resolve 'hive-mcp.knowledge-graph.edges/add-edge!)))
-       :cache             (cache/cache-status)}))
+  (ok {:bridge-available?
+       (some? (r/rescue nil
+                        (requiring-resolve
+                         'hive-mcp.knowledge-graph.edges/add-edge!)))
+       :sidecar (sidecar/health)
+       :cache (cache/cache-status)}))
+
+(defn- h-job-status
+  [{:keys [project_id job_id]}]
+  (if (str/blank? project_id)
+    (err :params/missing-project-id
+         {:message "project_id is required"})
+    (let [result (sidecar/job-status project_id job_id)]
+      (if (:error result)
+        (err (:error result) (dissoc result :error))
+        (ok result)))))
+
+(defn- h-cancel
+  [{:keys [project_id job_id]}]
+  (if (str/blank? project_id)
+    (err :params/missing-project-id
+         {:message "project_id is required"})
+    (let [result (sidecar/cancel-analysis! project_id job_id)]
+      (if (:error result)
+        (err (:error result) (dissoc result :error))
+        (ok result)))))
 
 ;; --- Live LSP bridge handlers ------------------------------------------------
 
@@ -251,6 +276,8 @@
    "ns-graph"        h-ns-graph
    "sync"            h-sync
    "status"          h-status
+   "job-status"      h-job-status
+   "cancel"          h-cancel
    "callers"         h-callers
    "references"      h-references
    "bridge-status"   h-bridge-status
@@ -301,28 +328,34 @@
 (defn tool-def
   "MCP tool definition for the LSP tool."
   []
-  {:name        "lsp"
-   :description (str "Clojure LSP analysis and KG sync tools. "
-                     "Static analysis: analyze, definitions, calls, ns-graph, callers, references, sync, status. "
-                     "Live LSP bridge: bridge-status, hover, definition, live-references, "
-                     "symbols, cursor-info, server-info, workspaces.")
-   :inputSchema {:type       "object"
-                 :properties {:command      {:type "string"
-                                             :enum (sort (keys command-handlers))}
-                              :project_root {:type        "string"
-                                             :description "Path to the project root directory"}
-                              :project_id   {:type        "string"
-                                             :description "Project identifier for KG sync"}
-                              :scope        {:type        "string"
-                                             :description "Scope for KG sync operations"}
-                              :namespace    {:type        "string"
-                                             :description "Filter by namespace (e.g., my.app.core)"}
-                              :function     {:type        "string"
-                                             :description "Filter by function name"}
-                              :file_path    {:type        "string"
-                                             :description "Path to file (live bridge commands)"}
-                              :line         {:type        "integer"
-                                             :description "0-based line number (live bridge commands)"}
-                              :column       {:type        "integer"
-                                             :description "0-based column number (live bridge commands)"}}
-                 :required   ["command"]}})
+  {:name "lsp"
+   :description
+   (str "Clojure LSP analysis, sidecar lifecycle, and KG sync tools. "
+        "Static analysis: analyze, definitions, calls, ns-graph, callers, "
+        "references, sync, status, job-status, cancel. "
+        "Live LSP bridge: bridge-status, hover, definition, live-references, "
+        "symbols, cursor-info, server-info, workspaces.")
+   :inputSchema
+   {:type "object"
+    :properties
+    {:command {:type "string"
+               :enum (sort (keys command-handlers))}
+     :project_root {:type "string"
+                    :description "Path to the project root directory"}
+     :project_id {:type "string"
+                  :description "Sidecar project identifier or KG sync id"}
+     :job_id {:type "string"
+              :description "Optional sidecar job identity guard"}
+     :scope {:type "string"
+             :description "Scope for KG sync operations"}
+     :namespace {:type "string"
+                 :description "Filter by namespace (e.g., my.app.core)"}
+     :function {:type "string"
+                :description "Filter by function name"}
+     :file_path {:type "string"
+                 :description "Path to file (live bridge commands)"}
+     :line {:type "integer"
+            :description "0-based line number (live bridge commands)"}
+     :column {:type "integer"
+              :description "0-based column number (live bridge commands)"}}
+    :required ["command"]}})

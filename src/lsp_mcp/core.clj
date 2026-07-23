@@ -16,7 +16,8 @@
    [lsp-mcp.cache :as cache]
    [lsp-mcp.kg-bridge :as bridge]
    [lsp-mcp.log :as log]
-   [lsp-mcp.transform :as transform]))
+   [lsp-mcp.transform :as transform]
+   [lsp-mcp.sidecar :as sidecar]))
 
 ;; =============================================================================
 ;; Public Steps
@@ -89,7 +90,8 @@
                             :result  sync-result}}))))
 
 (defn status
-  "Return status information about the LSP bridge and cache."
+  "Return bridge, functional sidecar, and cache status."
   []
   {:bridge-available? (bridge/available?)
-   :cache             (cache/cache-status)})
+   :sidecar (sidecar/health)
+   :cache (cache/cache-status)})

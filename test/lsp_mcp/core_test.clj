@@ -7,7 +7,8 @@
    Mocks return Results; assertions unwrap with r/ok?/r/err?."
   (:require [clojure.test :refer [deftest is testing]]
             [hive-dsl.result :as r]
-            [lsp-mcp.core :as core]))
+            [lsp-mcp.core :as core]
+            [lsp-mcp.sidecar :as sidecar]))
 
 ;; =============================================================================
 ;; Test Data
@@ -165,15 +166,21 @@
 ;; =============================================================================
 
 (deftest status-test
-  (testing "status returns bridge and cache info"
-    (with-redefs [lsp-mcp.kg-bridge/available?  (constantly false)
-                  lsp-mcp.cache/cache-status     (constantly {:cache-dir "/tmp/test" :projects []})]
+  (testing "status returns bridge, functional sidecar, and cache info"
+    (with-redefs [lsp-mcp.kg-bridge/available? (constantly false)
+                  sidecar/health (constantly {:status :ok
+                                              :functional? true})
+                  lsp-mcp.cache/cache-status
+                  (constantly {:cache-dir "/tmp/test" :projects []})]
       (let [result (core/status)]
         (is (false? (:bridge-available? result)))
+        (is (= :ok (get-in result [:sidecar :status])))
         (is (= "/tmp/test" (get-in result [:cache :cache-dir]))))))
-
   (testing "status with available bridge"
-    (with-redefs [lsp-mcp.kg-bridge/available?  (constantly true)
-                  lsp-mcp.cache/cache-status     (constantly {:cache-dir "/tmp/test" :projects []})]
+    (with-redefs [lsp-mcp.kg-bridge/available? (constantly true)
+                  sidecar/health (constantly {:status :degraded})
+                  lsp-mcp.cache/cache-status
+                  (constantly {:cache-dir "/tmp/test" :projects []})]
       (let [result (core/status)]
-        (is (true? (:bridge-available? result)))))))
+        (is (true? (:bridge-available? result)))
+        (is (= :degraded (get-in result [:sidecar :status])))))))

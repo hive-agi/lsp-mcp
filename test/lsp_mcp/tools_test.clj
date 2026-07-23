@@ -6,7 +6,8 @@
   (:require [clojure.test :refer [deftest is testing use-fixtures]]
             [clojure.edn :as edn]
             [hive-dsl.result :as r]
-            [lsp-mcp.tools :as tools]))
+            [lsp-mcp.tools :as tools]
+            [lsp-mcp.sidecar :as sidecar]))
 
 ;; =============================================================================
 ;; Test Fixtures
@@ -108,11 +109,16 @@
       (is (empty? result)))))
 
 (deftest handle-lsp-ns-graph-test
-  (testing "ns-graph command returns namespace dependency graph"
-    (let [result (parse-response (tools/handle-lsp {:command "ns-graph" :project_root "/test"}))]
-      (is (= 2 (count result)))
-      (is (every? :ns result))
-      (is (every? :depends-on result)))))
+  (testing "ns-graph command returns bounded graph metadata"
+    (let [result (parse-response
+                  (tools/handle-lsp
+                   {:command "ns-graph" :project_root "/test"}))
+          graph (:ns-graph result)]
+      (is (= 2 (:total result)))
+      (is (= 2 (:returned result)))
+      (is (false? (:truncated? result)))
+      (is (every? :ns graph))
+      (is (every? :depends-on graph)))))
 
 (deftest handle-lsp-callers-test
   (testing "callers command returns callers of a function"
@@ -146,6 +152,41 @@
     (let [result (parse-response (tools/handle-lsp {:command "status"}))]
       (is (contains? result :bridge-available?))
       (is (contains? result :cache)))))
+
+(deftest handle-lsp-job-lifecycle-test
+  (testing "job-status exposes the persisted lifecycle"
+    (with-redefs [sidecar/job-status
+                  (fn [project-id job-id]
+                    {:project-id project-id
+                     :job-id job-id
+                     :status :running})]
+      (let [response (tools/handle-lsp
+                      {:command "job-status"
+                       :project_id "hive/demo"
+                       :job_id "job-1"})
+            result (parse-response response)]
+        (is (nil? (:isError response)))
+        (is (= :running (:status result)))
+        (is (= "job-1" (:job-id result))))))
+  (testing "cancel passes the optional identity guard"
+    (with-redefs [sidecar/cancel-analysis!
+                  (fn [project-id job-id]
+                    {:project-id project-id
+                     :job-id job-id
+                     :status :cancelling
+                     :cancel-requested true})]
+      (let [result (parse-response
+                    (tools/handle-lsp
+                     {:command "cancel"
+                      :project_id "hive/demo"
+                      :job_id "job-1"}))]
+        (is (:cancel-requested result))
+        (is (= :cancelling (:status result))))))
+  (testing "lifecycle commands require project_id"
+    (let [response (tools/handle-lsp {:command "job-status"})
+          result (parse-response response)]
+      (is (:isError response))
+      (is (= :params/missing-project-id (:error result))))))
 
 ;; =============================================================================
 ;; Error handling tests
@@ -205,6 +246,14 @@
       (is (some #{"status"} enum))
       (is (some #{"callers"} enum))
       (is (some #{"references"} enum)))))
+
+(deftest tool-def-includes-sidecar-lifecycle-test
+  (let [schema (:inputSchema (tools/tool-def))
+        commands (get-in schema [:properties :command :enum])]
+    (is (some #{"job-status"} commands))
+    (is (some #{"cancel"} commands))
+    (is (= "string"
+           (get-in schema [:properties :job_id :type])))))
 
 ;; =============================================================================
 ;; Nil project_root validation tests (now :params/missing-root)

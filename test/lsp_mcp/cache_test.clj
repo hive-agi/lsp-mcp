@@ -89,6 +89,29 @@
           (is (contains? result :analysis))
           (is (contains? result :dep-graph)))))))
 
+(deftest test-read-analysis-rebases-sidecar-source-roots
+  (testing "focused cache file URIs resolve through the host workspace mount"
+    (with-test-cache
+      (fn [temp-dir]
+        (let [project-id "rebase-project"
+              project-dir (io/file temp-dir project-id)]
+          (.mkdirs project-dir)
+          (spit (io/file project-dir "meta.edn")
+                (pr-str (assoc fresh-meta :project-id project-id)))
+          (spit (io/file project-dir "var-defs.edn")
+                (pr-str [{:file "file:///workspace/hive/rebase/src/a.clj"}]))
+          (spit (io/file project-dir "call-graph.edn")
+                (pr-str [{:file "file:/workspace/hive/rebase/src/a.clj"}]))
+          (spit (io/file project-dir "ns-graph.edn") "{}")
+          (spit (io/file project-dir "ns-defs.edn") "[]")
+          (spit (io/file project-dir "summary.edn") "{}")
+          (with-redefs [cache/workspace-root (constantly "/host/PP")]
+            (let [result (cache/read-analysis project-id)]
+              (is (= "file:///host/PP/hive/rebase/src/a.clj"
+                     (:file (first (:var-defs result)))))
+              (is (= "file:///host/PP/hive/rebase/src/a.clj"
+                     (:file (first (:call-graph result))))))))))))
+
 (deftest test-read-analysis-no-cache
   (testing "returns nil for non-existent project"
     (with-test-cache
@@ -158,6 +181,23 @@
           (is (contains? projects "project-b"))
           (is (not (contains? projects "project-c"))))))))
 
+(deftest test-list-cached-projects-recursive
+  (testing "finds nested and job-only projects while pruning kondo-cache"
+    (with-test-cache
+      (fn [temp-dir]
+        (write-cache-files! temp-dir "hive/lsp-mcp"
+                            {:meta-data fresh-meta})
+        (let [queued-dir (io/file temp-dir "hive/queued")
+              ignored-dir (io/file temp-dir "kondo-cache/library")]
+          (.mkdirs queued-dir)
+          (.mkdirs ignored-dir)
+          (spit (io/file queued-dir "job.edn")
+                (pr-str {:status :queued}))
+          (spit (io/file ignored-dir "meta.edn")
+                (pr-str fresh-meta))
+          (is (= ["hive/lsp-mcp" "hive/queued"]
+                 (cache/list-cached-projects))))))))
+
 (deftest test-cache-status
   (testing "returns status map with project details"
     (with-test-cache
@@ -173,6 +213,30 @@
             (is (= :ok (:status proj)))
             (is (true? (:fresh? proj)))
             (is (number? (:duration-ms proj)))))))))
+
+(deftest test-cache-status-includes-job-and-queue-telemetry
+  (testing "queued jobs and the worker heartbeat remain visible before completion"
+    (with-test-cache
+      (fn [temp-dir]
+        (let [project-id "hive/queued"
+              queued-at (- (System/currentTimeMillis) 50)]
+          (write-cache-files! temp-dir project-id
+                              {:meta-data (assoc fresh-meta :project-id project-id)})
+          (spit (io/file temp-dir project-id "job.edn")
+                (pr-str {:job-id "job-1"
+                         :project-id project-id
+                         :status :queued
+                         :queued-at-ms queued-at}))
+          (spit (io/file temp-dir "_health.edn")
+                (pr-str {:status :ok :heartbeat-at-ms queued-at}))
+          (let [status (cache/cache-status)
+                project (first (:projects status))]
+            (is (= :queued (:status project)))
+            (is (= :ok (:cache-status project)))
+            (is (= "job-1" (get-in project [:job :job-id])))
+            (is (= 1 (get-in status [:queue :queued])))
+            (is (pos? (get-in status [:queue :oldest-queued-ms])))
+            (is (= :ok (get-in status [:sidecar-heartbeat :status])))))))))
 
 (deftest test-invalidate!-forces-reparse
   (testing "invalidate! drops the in-memory parse so the next read re-reads disk"

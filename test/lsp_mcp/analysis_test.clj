@@ -163,29 +163,30 @@
 
 (deftest test-analyze-project!-cache-hit
   (testing "returns ok Result wrapping cached analysis when cache fresh"
-    (with-redefs [cache/read-analysis (fn [_project-id] sample-cached-analysis)]
+    (with-redefs [cache/project-id-for (constantly "fake-project")
+                  cache/read-analysis
+                  (fn [_project-id] sample-cached-analysis)]
       (let [result (analysis/analyze-project! "/tmp/fake-project")]
         (is (r/ok? result))
         (is (= sample-cached-analysis (:ok result)))))))
 
 (deftest test-analyze-project!-cache-miss-no-lsp
   (testing "returns err Result with structured fix info when all sources fail"
-    (with-redefs [cache/read-analysis (fn [_project-id] nil)
-                  ;; Mock sidecar to avoid actual Docker calls in tests
-                  lsp-mcp.sidecar/ensure-analysis! (fn [_pid]
-                                                      {:error :analysis/sidecar-unavailable
-                                                       :fix   :start-sidecar
-                                                       :command "docker compose up -d lsp-sidecar"
-                                                       :message "mock sidecar unavailable"})]
+    (with-redefs [cache/project-id-for (constantly "fake-project")
+                  cache/read-analysis (fn [_project-id] nil)
+                  lsp-mcp.sidecar/ensure-analysis!
+                  (fn [_pid]
+                    {:error :analysis/sidecar-unavailable
+                     :fix :start-sidecar
+                     :command "docker compose up -d lsp-sidecar"
+                     :message "mock sidecar unavailable"})]
       (let [result (analysis/analyze-project! "/tmp/fake-project")]
         (is (r/err? result))
         (is (#{:analysis/lsp-unavailable :analysis/dump-failed
                :analysis/sidecar-unavailable :analysis/sidecar-timeout}
              (:error result)))
-        ;; GOAL 2: structured errors must include :fix
         (is (keyword? (:fix result))
             "Error result must include :fix key for self-remediation"))))
-
   (testing "structured error on missing-root includes :fix :init-project"
     (let [result (analysis/analyze-project! nil)]
       (is (= :analysis/missing-root (:error result)))
@@ -193,13 +194,19 @@
       (is (string? (:hint result))))))
 
 (deftest test-analyze-project!-derives-project-id-from-path
-  (testing "project-id is basename of project-root path"
-    (let [queried-id (atom nil)]
-      (with-redefs [cache/read-analysis (fn [project-id]
-                                          (reset! queried-id project-id)
-                                          sample-cached-analysis)]
-        (analysis/analyze-project! "/home/user/projects/my-cool-project")
-        (is (= "my-cool-project" @queried-id))))))
+  (testing "uses the workspace-relative project-id supplied by the cache bridge"
+    (let [queried-id (atom nil)
+          project-root "/home/user/projects/my-cool-project"]
+      (with-redefs [cache/project-id-for
+                    (fn [root]
+                      (is (= project-root root))
+                      "projects/my-cool-project")
+                    cache/read-analysis
+                    (fn [project-id]
+                      (reset! queried-id project-id)
+                      sample-cached-analysis)]
+        (analysis/analyze-project! project-root)
+        (is (= "projects/my-cool-project" @queried-id))))))
 
 ;; =============================================================================
 ;; analyze-project! — :local/root pre-flight (sidecar path)

@@ -45,9 +45,10 @@
 
 (defspec p2-analyze-valid-total 50
   (prop/for-all [root gen-valid-project-root]
-                (with-redefs [cache/read-analysis (constantly sample-cached)]
-                  (let [result (analysis/analyze-project! root)]
-                    (r/ok? result)))))
+    (with-redefs [cache/project-id-for (constantly "generated/project")
+                  cache/read-analysis (constantly sample-cached)]
+      (let [result (analysis/analyze-project! root)]
+        (r/ok? result)))))
 
 ;; =============================================================================
 ;; P3 — Complement: blank => :analysis/missing-root, non-blank => never

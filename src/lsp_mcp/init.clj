@@ -13,7 +13,8 @@
   (:require [lsp-mcp.tools :as tools]
             [lsp-mcp.cache :as cache]
             [lsp-mcp.log :as log]
-            [hive-dsl.result :as r]))
+            [hive-dsl.result :as r]
+            [lsp-mcp.sidecar :as sidecar]))
 
 ;; =============================================================================
 ;; Resolution Helpers
@@ -30,6 +31,29 @@
 ;; =============================================================================
 
 (defonce ^:private addon-instance (atom nil))
+
+(defn- contribute-lifecycle-commands!
+  []
+  (when-let [contribute!
+             (try-resolve
+              'hive-mcp.extensions.registry/contribute-commands!)]
+    (contribute!
+     "analysis"
+     :lsp
+     {"job-status"
+      {:handler #(tools/handle-lsp (assoc % :command "job-status"))
+       :params {"project_id" {:type "string"
+                              :description "Sidecar project identifier"}
+                "job_id" {:type "string"
+                          :description "Optional current job identity guard"}}
+       :description "Inspect queued/running/terminal sidecar job state"}
+      "cancel"
+      {:handler #(tools/handle-lsp (assoc % :command "cancel"))
+       :params {"project_id" {:type "string"
+                              :description "Sidecar project identifier"}
+                "job_id" {:type "string"
+                          :description "Optional current job identity guard"}}
+       :description "Cancel a queued or running sidecar analysis"}})))
 
 (defn- make-addon
   "Create an IAddon reify for lsp-mcp.
@@ -116,7 +140,8 @@
                               "bridge-status" {:handler #(tools/handle-lsp (assoc % :command "bridge-status"))
                                                :params {}
                                                :description "Check live LSP bridge availability"}}))
-              (log/info "lsp-mcp addon initialized")
+              (let [_ (contribute-lifecycle-commands!)]
+                (log/info "lsp-mcp addon initialized"))
               {:success? true
                :errors []
                :metadata {:tools 0
@@ -136,9 +161,11 @@
 
         (health [_]
           (if (:initialized? @state)
-            {:status  :ok
-             :details {:cache (cache/cache-status)}}
-            {:status  :down
+            (let [sidecar-health (sidecar/health)]
+              {:status (:status sidecar-health)
+               :details {:sidecar sidecar-health
+                         :cache (cache/cache-status)}})
+            {:status :down
              :details {:reason "not initialized"}}))))))
 
 ;; =============================================================================
@@ -226,12 +253,20 @@
       {:registered (mapv :name (register-tools!)) :total 1})))
 
 (defn available?
-  "Check if LSP analysis backend is reachable (sidecar cache or clojure-lsp)."
+  "True when a functional sidecar, usable cache, or in-process LSP exists."
   []
-  (or (seq (cache/cache-status))
-      (r/rescue false
-        (requiring-resolve 'clojure-lsp.api/analyze-project-and-deps!)
-        true)))
+  (let [sidecar-health (sidecar/health)
+        cache-status   (cache/cache-status)
+        usable-cache?  (boolean
+                        (some #(= :ok (:cache-status %))
+                              (:projects cache-status)))
+        in-process?    (r/rescue false
+                                 (requiring-resolve
+                                  'clojure-lsp.api/analyze-project-and-deps!)
+                                 true)]
+    (or (= :ok (:status sidecar-health))
+        usable-cache?
+        in-process?)))
 
 (defn get-addon-instance
   "Return the current IAddon instance, or nil."
