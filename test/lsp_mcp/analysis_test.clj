@@ -165,7 +165,7 @@
   (testing "returns ok Result wrapping cached analysis when cache fresh"
     (with-redefs [cache/project-id-for (constantly "fake-project")
                   cache/read-analysis
-                  (fn [_project-id] sample-cached-analysis)]
+                  (fn [_project-id _opts] sample-cached-analysis)]
       (let [result (analysis/analyze-project! "/tmp/fake-project")]
         (is (r/ok? result))
         (is (= sample-cached-analysis (:ok result)))))))
@@ -173,7 +173,7 @@
 (deftest test-analyze-project!-cache-miss-no-lsp
   (testing "returns err Result with structured fix info when all sources fail"
     (with-redefs [cache/project-id-for (constantly "fake-project")
-                  cache/read-analysis (fn [_project-id] nil)
+                  cache/read-analysis (fn [_project-id _opts] nil)
                   lsp-mcp.sidecar/ensure-analysis!
                   (fn [_pid]
                     {:error :analysis/sidecar-unavailable
@@ -202,7 +202,7 @@
                       (is (= project-root root))
                       "projects/my-cool-project")
                     cache/read-analysis
-                    (fn [project-id]
+                    (fn [project-id _opts]
                       (reset! queried-id project-id)
                       sample-cached-analysis)]
         (analysis/analyze-project! project-root)
@@ -231,7 +231,7 @@
     (with-temp-deps-edn
       "{:deps {a/b {:local/root \"/nowhere/foreign\"}}}"
       (fn [project-root]
-        (with-redefs [cache/read-analysis (fn [_] nil)
+        (with-redefs [cache/read-analysis (fn [_ _] nil)
                       cache/workspace-root (fn [] "/strictly-isolated-workspace")
                       cache/project-id-for (fn [_] "fake-id")
                       sidecar/ensure-analysis! (fn [_]
@@ -253,7 +253,7 @@
     (with-temp-deps-edn
       "{:deps {a/b {:mvn/version \"1.0\"}}}"
       (fn [project-root]
-        (with-redefs [cache/read-analysis (fn [_] nil)
+        (with-redefs [cache/read-analysis (fn [_ _] nil)
                       cache/workspace-root (fn [] project-root)
                       cache/project-id-for (fn [_] "fake-id")
                       sidecar/ensure-analysis! (fn [_]

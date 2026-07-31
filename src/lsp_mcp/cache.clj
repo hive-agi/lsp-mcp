@@ -203,6 +203,42 @@
                                 (* (:timestamp meta) 1000))]
             (< cache-age-ms max-age-ms))))))
 
+(def ^:private source-file-re
+  "Extensions whose change invalidates an analysis dump."
+  #"\.(clj[cs]?|cljel|edn)$")
+
+(def ^:private skip-dir-names
+  "Directory basenames never walked for content freshness."
+  #{".git" ".cpcache" ".lsp" ".clj-kondo" "target" "classes"
+    "node_modules" ".codebase-memory" "data" ".worktrees"})
+
+(defn source-tree-newer-than?
+  "True when any source-relevant file — or any walked directory, so deletions
+   and renames (which touch only the parent dir) are seen — under `root` has
+   an mtime at or after `epoch-ms`. A missing/non-directory root answers true
+   (fail-safe: treat as changed)."
+  [root epoch-ms]
+  (let [rf (io/file root)]
+    (if-not (.isDirectory rf)
+      true
+      (loop [stack [rf]]
+        (if-let [^java.io.File f (peek stack)]
+          (let [stack (pop stack)]
+            (cond
+              (.isDirectory f)
+              (if (contains? skip-dir-names (.getName f))
+                (recur stack)
+                (if (>= (.lastModified f) epoch-ms)
+                  true
+                  (recur (into stack (.listFiles f)))))
+
+              (and (re-find source-file-re (.getName f))
+                   (>= (.lastModified f) epoch-ms))
+              true
+
+              :else (recur stack)))
+          false)))))
+
 (defn read-analysis
   "Read cached analysis dump for a project.
 
@@ -210,11 +246,16 @@
    or nil if cache is missing, errored, or stale.
 
    Options:
-     :max-age-ms        - max cache age in ms (default: 10 min)
+     :source-root       - project root dir; when given, freshness is
+                          CONTENT-KEYED: the dump is fresh while no source
+                          file/dir under the root is newer than it, and
+                          :max-age-ms is ignored
+     :max-age-ms        - max cache age in ms (default: 10 min); the
+                          fallback when no :source-root is supplied
      :ignore-staleness  - if true, return data even if stale"
   ([project-id]
    (read-analysis project-id {}))
-  ([project-id {:keys [max-age-ms ignore-staleness]
+  ([project-id {:keys [max-age-ms ignore-staleness source-root]
                 :or   {max-age-ms default-max-age-ms}}]
    (let [meta (read-meta project-id)]
      (cond
@@ -228,11 +269,14 @@
            nil)
 
        (and (not ignore-staleness)
-            (let [age-ms (- (System/currentTimeMillis)
-                            (* (:timestamp meta) 1000))]
-              (> age-ms max-age-ms)))
+            (let [dump-ms (* (:timestamp meta) 1000)]
+              (if source-root
+                (source-tree-newer-than? source-root dump-ms)
+                (> (- (System/currentTimeMillis) dump-ms) max-age-ms))))
        (do (log/warn "Stale cache for project:" project-id
-                     "max-age-ms:" max-age-ms)
+                     (if source-root
+                       (str "source under " source-root " changed since dump")
+                       (str "max-age-ms: " max-age-ms)))
            nil)
 
        :else

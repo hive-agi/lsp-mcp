@@ -25,18 +25,24 @@
 
 (defn- try-cache
   "Try cached analysis from Docker sidecar. Returns Result.
-   ok = cached map; err :analysis/cache-miss with structured fix info."
-  [project-id]
-  (if-let [cached (cache/read-analysis project-id)]
-    (do (log/info "Using cached analysis for" project-id)
-        (r/ok cached))
-    (r/err :analysis/cache-miss
-           {:project-id project-id
-            :fix        :trigger-sidecar
-            :command    "docker exec hive-mcp-lsp-sidecar kill -HUP 1"
-            :hint       (str "No cached analysis for '" project-id "'. "
-                             "Trigger sidecar or wait for next cycle.")
-            :message    (str "Cache miss for project: " project-id)})))
+   ok = cached map; err :analysis/cache-miss with structured fix info.
+   `project-root` (optional) switches freshness to content-keyed: the dump
+   stays valid while no source under the root changed since it was written."
+  ([project-id] (try-cache project-id nil))
+  ([project-id project-root]
+   (if-let [cached (cache/read-analysis project-id
+                                        (if project-root
+                                          {:source-root project-root}
+                                          {}))]
+     (do (log/info "Using cached analysis for" project-id)
+         (r/ok cached))
+     (r/err :analysis/cache-miss
+            {:project-id project-id
+             :fix        :trigger-sidecar
+             :command    "docker exec hive-mcp-lsp-sidecar kill -HUP 1"
+             :hint       (str "No cached analysis for '" project-id "'. "
+                              "Trigger sidecar or wait for next cycle.")
+             :message    (str "Cache miss for project: " project-id)}))))
 
 (defn- try-in-process
   "Fallback to in-process clojure-lsp.api/dump. Returns Result.
@@ -140,7 +146,7 @@
             :command "echo '{:deps {}}' > deps.edn"
             :message "project-root is required for analysis"})
     (if-let [project-id (cache/project-id-for project-root)]
-      (let [cached (try-cache project-id)]
+      (let [cached (try-cache project-id project-root)]
         (if (r/ok? cached)
           cached
           (let [in-proc (try-in-process project-root)]

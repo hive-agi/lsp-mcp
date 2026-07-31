@@ -139,6 +139,57 @@
           (is (some? result))
           (is (contains? result :analysis)))))))
 
+(defn- make-source-root!
+  "Temp dir with one .clj file; every mtime (dirs included) set to
+   `epoch-ms`. Returns the root path string."
+  [epoch-ms]
+  (let [root (java.io.File/createTempFile "lsp-src-test" "")]
+    (.delete root)
+    (.mkdirs root)
+    (let [src (io/file root "src")
+          f   (io/file src "core.clj")]
+      (.mkdirs src)
+      (spit f "(ns core)")
+      (doseq [^java.io.File x [f src root]]
+        (.setLastModified x epoch-ms))
+      (.getAbsolutePath root))))
+
+(deftest test-read-analysis-content-fresh-outlives-ttl
+  (testing "an hour-old dump stays fresh under :source-root while the tree is untouched"
+    (with-test-cache
+      (fn [temp-dir]
+        (let [hour-old (- (current-epoch-seconds) 3600)
+              root     (make-source-root! (* (- hour-old 3600) 1000))]
+          (write-cache-files! temp-dir "test-project"
+                              {:dump-data sample-dump
+                               :meta-data (assoc fresh-meta :timestamp hour-old)})
+          (is (nil? (cache/read-analysis "test-project"))
+              "TTL alone still rejects it — the control")
+          (is (some? (cache/read-analysis "test-project" {:source-root root}))
+              "content says nothing changed, so age must not matter"))))))
+
+(deftest test-read-analysis-content-stale-beats-ttl
+  (testing "a seconds-old dump is stale under :source-root when a file is newer"
+    (with-test-cache
+      (fn [temp-dir]
+        (let [root (make-source-root! (System/currentTimeMillis))]
+          (write-cache-files! temp-dir "test-project"
+                              {:dump-data sample-dump
+                               :meta-data (assoc fresh-meta
+                                                 :timestamp (- (current-epoch-seconds) 60))})
+          (is (nil? (cache/read-analysis "test-project" {:source-root root}))
+              "a young TTL must not mask a real change"))))))
+
+(deftest test-read-analysis-missing-source-root-is-fail-safe
+  (testing "an unreadable root answers stale, never silently fresh"
+    (with-test-cache
+      (fn [temp-dir]
+        (write-cache-files! temp-dir "test-project"
+                            {:dump-data sample-dump
+                             :meta-data fresh-meta})
+        (is (nil? (cache/read-analysis "test-project"
+                                       {:source-root "/nope/definitely/absent"})))))))
+
 (deftest test-read-analysis-error-status
   (testing "returns nil when cache status is :error"
     (with-test-cache
