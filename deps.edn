@@ -1,6 +1,6 @@
 {:paths ["src" "resources"]
- :deps {org.clojure/clojure {:mvn/version "1.12.0"}
-        org.clojure/data.json {:mvn/version "2.5.1"}
+ :deps {org.clojure/clojure {:mvn/version "1.12.5"}
+        org.clojure/data.json {:mvn/version "2.5.2"}
         com.taoensso/timbre {:mvn/version "6.8.0"}
 
         ;; hive-dsl — Result monad (railway-oriented error handling),
@@ -38,7 +38,7 @@
           :ns-default hive-build.api}
 :test {:extra-paths ["test"]
          :extra-deps {lambdaisland/kaocha {:mvn/version "1.91.1392"}
-                      org.clojure/test.check {:mvn/version "1.1.1"}
+                      org.clojure/test.check {:mvn/version "1.1.3"}
                       io.github.hive-agi/hive-test
                       {:mvn/version "0.3.12"}}}
   ;; Optional: add clojure-lsp for in-process fallback (not required for cache-first mode)
