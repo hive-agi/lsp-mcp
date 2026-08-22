@@ -1,5 +1,14 @@
 # lsp-mcp
 
+<!-- hive-badges -->
+
+[![Clojars Project](https://img.shields.io/clojars/v/io.github.hive-agi/lsp-mcp.svg)](https://clojars.org/io.github.hive-agi/lsp-mcp)
+[![cljdoc](https://cljdoc.org/badge/io.github.hive-agi/lsp-mcp)](https://cljdoc.org/d/io.github.hive-agi/lsp-mcp/CURRENT)
+[![release](https://github.com/hive-agi/lsp-mcp/actions/workflows/release.yml/badge.svg)](https://github.com/hive-agi/lsp-mcp/actions/workflows/release.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
+
+<!-- /hive-badges -->
+
 Clojure LSP analysis addon for hive-mcp. Provides structural code analysis via three strategies:
 
 1. **Docker sidecar cache** -- fast reads from pre-analyzed snapshots
