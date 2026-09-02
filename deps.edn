@@ -32,7 +32,7 @@
         ;; hive-help — Elm-style diagnostic message builders
         ;; (param coercion + project-level diag for sidecar pre-flight)
         io.github.hive-agi/hive-help
-        {:mvn/version "0.1.1"}
+        {:mvn/version "0.1.0"}
 
         ;; babashka.fs — filesystem sugar (canonicalize, relativize, etc.)
         babashka/fs {:mvn/version "0.5.34"}}
