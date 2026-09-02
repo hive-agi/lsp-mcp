@@ -3,6 +3,12 @@
         org.clojure/data.json {:mvn/version "2.5.2"}
         com.taoensso/timbre {:mvn/version "6.8.0"}
 
+        ;; hive-addon: the IAddon contract this addon implements. Depending on
+        ;; the contract lib rather than on a host namespace is what lets any
+        ;; host, hive-mcp or not, mount this jar.
+        io.github.hive-agi/hive-addon
+        {:mvn/version "0.3.10"}
+
         ;; hive-dsl — Result monad (railway-oriented error handling),
         ;; rescue/guard, lifecycle protocol
         io.github.hive-agi/hive-dsl
