@@ -2,4 +2,5 @@
  :parent "hive"
  :description "LSP integration for MCP protocol"
  :language :clojure
- :tags ["lsp" "mcp"]}
+ :tags ["lsp" "mcp"] 
+ :carto {:source-roots ["resources" "src" "test"]}}
