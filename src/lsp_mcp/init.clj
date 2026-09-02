@@ -13,6 +13,7 @@
   (:require [lsp-mcp.tools :as tools]
             [lsp-mcp.cache :as cache]
             [lsp-mcp.log :as log]
+            [hive-addon.protocol :as addon]
             [hive-dsl.result :as r]
             [lsp-mcp.sidecar :as sidecar]))
 
@@ -56,13 +57,11 @@
        :description "Cancel a queued or running sidecar analysis"}})))
 
 (defn- make-addon
-  "Create an IAddon reify for lsp-mcp.
-   Returns nil if protocol is not on classpath."
+  "Create an IAddon reify for lsp-mcp."
   []
-  (when (try-resolve 'hive-mcp.addons.protocol/IAddon)
-    (let [state (atom {:initialized? false})]
-      (reify
-        hive-mcp.addons.protocol/IAddon
+  (let [state (atom {:initialized? false})]
+    (reify
+      addon/IAddon
 
         (addon-id [_] "lsp.mcp")
 
@@ -166,7 +165,7 @@
                :details {:sidecar sidecar-health
                          :cache (cache/cache-status)}})
             {:status :down
-             :details {:reason "not initialized"}}))))))
+             :details {:reason "not initialized"}})))))
 
 ;; =============================================================================
 ;; Dep Registry + Nil-Railway Pipeline
