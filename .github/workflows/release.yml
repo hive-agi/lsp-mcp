@@ -30,6 +30,12 @@ jobs:
         with:
           cli: latest
 
+      # A published pom is immutable, so the suite runs BEFORE anything
+      # is minted. Without this step a red push straight to main still
+      # deploys, and the bad version can never be replaced.
+      - name: Run tests
+        run: clojure -M:test -m kaocha.runner
+
       - name: Bump patch version
         run: clojure -T:build bump :level :patch
 
