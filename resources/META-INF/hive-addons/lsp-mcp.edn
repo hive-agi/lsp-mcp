@@ -4,4 +4,6 @@
  :addon/init-ns      "lsp-mcp.init"
  :addon/init-fn      "addon-ctor"
  :addon/capabilities #{:tools}
- :addon/description  "Clojure LSP analysis and KG sync — deterministic L1 structural layer"}
+ :addon/description  "Clojure LSP analysis and KG sync — deterministic L1 structural layer"
+ :addon/maturity :stable
+ :addon/trust-class :foss}
