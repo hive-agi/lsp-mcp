@@ -1,7 +1,7 @@
 {:paths ["src"]
  :deps {cheshire/cheshire {:mvn/version "6.2.0"}
-        io.github.hive-agi/modex-bb {:git/tag "v0.1.7"
-                                     :git/sha "c4f4722874b6005a7468113f3b02fdad5423061d"}}
+        io.github.hive-agi/modex-bb {:git/tag "v0.1.8"
+                                     :git/sha "1350c8788ed9fcdbd3aa202c963220f1d16e8788"}}
  :tasks
  {server {:doc "Start the LSP MCP server (babashka)"
           :task (exec 'lsp-mcp.server/-main)}}}
