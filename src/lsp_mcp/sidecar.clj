@@ -348,11 +348,30 @@
    :status :cancelled
    :message (str "Sidecar analysis was cancelled for " project-id)})
 
+(defn- degraded-note
+  "When META marks a generation as degraded, the keys a successful result
+   carries so no caller mistakes it for a complete analysis. nil otherwise.
+
+   :classpath-unavailable means the project's classpath could not be built
+   (an uncached dependency with no network, an unreachable registry), so the
+   sidecar analyzed the project's own sources only: its definitions and
+   internal calls are present, definitions inside dependencies are not."
+  [project-id meta]
+  (when-let [degraded (:degraded meta)]
+    (let [log-path (str (cache/cache-dir) "/" project-id "/dump.classpath.log")]
+      (log/warn "Sidecar analysis for" project-id "is degraded:" degraded)
+      {:degraded degraded
+       :log-path log-path
+       :warning  (str "Analysis of " project-id " is degraded (" (name degraded)
+                      "): project sources only, dependency definitions missing. "
+                      "See " log-path)})))
+
 (defn await-cache-ready
   "Wait for a sidecar generation newer than baseline-generation.
 
    Returns {:ok analysis} for a completed dump, a structured terminal error,
-   or nil when no terminal generation arrives before timeout."
+   or nil when no terminal generation arrives before timeout. A degraded
+   generation also carries :degraded and :warning (see degraded-note)."
   ([project-id]
    (await-cache-ready project-id nil default-timeout-ms))
   ([project-id timeout-ms]
@@ -384,7 +403,7 @@
                               {:ignore-staleness true})]
                  (do
                    (log/info "Sidecar analysis ready for" project-id)
-                   {:ok data})
+                   (merge {:ok data} (degraded-note project-id meta)))
                  {:error :analysis/sidecar-cache-invalid
                   :fix :inspect-sidecar-log
                   :project-id project-id
@@ -445,10 +464,11 @@
   "Ensure analysis is available for project-id.
 
    Fresh cache hits return immediately. Cache misses request a new sidecar
-   generation and distinguish terminal dump failures from genuine timeouts."
+   generation and distinguish terminal dump failures from genuine timeouts.
+   A degraded analysis carries :degraded and :warning next to :ok."
   [project-id]
   (if-let [cached (cache/read-analysis project-id)]
-    {:ok cached}
+    (merge {:ok cached} (degraded-note project-id (cache/read-meta project-id)))
     (if-not (project-id-resolves? project-id)
       (unresolvable-project-id-error project-id)
       (let [ready (ensure-sidecar-running!)]
@@ -477,7 +497,8 @@
   "Force a fresh sidecar generation for project-id.
 
    Waits for a generation token change, returns terminal dump failures
-   immediately, and invalidates the parsed cache before reading the new dump."
+   immediately, and invalidates the parsed cache before reading the new dump.
+   A degraded generation carries :degraded and :warning in the result."
   [project-id]
   (if-not (project-id-resolves? project-id)
     (unresolvable-project-id-error project-id)
@@ -495,9 +516,10 @@
                   (log/info "Sidecar analysis refreshed for" project-id
                             "old-ts:" (:timestamp old-meta)
                             "new-ts:" (:timestamp new-meta))
-                  {:refreshed? true
-                   :old-ts     (:timestamp old-meta)
-                   :new-ts     (:timestamp new-meta)})
+                  (merge {:refreshed? true
+                          :old-ts     (:timestamp old-meta)
+                          :new-ts     (:timestamp new-meta)}
+                         (select-keys outcome [:degraded :log-path :warning])))
                 outcome)
               {:error   :analysis/sidecar-timeout
                :fix     :trigger-sidecar

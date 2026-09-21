@@ -211,6 +211,35 @@
           (is (= {:ok {:fresh true}} result))
           (is (= "hive/ready" @invalidated)))))))
 
+(deftest await-cache-ready-flags-a-degraded-generation
+  (testing "a classpath-degraded dump is ok, but says so"
+    (with-redefs [cache/read-meta (fn [_]
+                                    {:timestamp 101
+                                     :completed-at-ms 101000
+                                     :status :ok
+                                     :degraded :classpath-unavailable})
+                  cache/invalidate! (fn [_] nil)
+                  cache/read-analysis (fn [_ _] {:fresh true})]
+      (let [result (sidecar/await-cache-ready
+                    "hive/degraded"
+                    {:timestamp 100 :status :ok}
+                    100)]
+        (is (= {:fresh true} (:ok result)) "the analysis is still returned")
+        (is (= :classpath-unavailable (:degraded result)))
+        (is (str/includes? (:warning result) "project sources only"))
+        (is (str/ends-with? (:log-path result) "hive/degraded/dump.classpath.log"))))))
+
+(deftest await-cache-ready-omits-degraded-keys-for-a-complete-generation
+  (testing "an undegraded dump carries :ok alone"
+    (with-redefs [cache/read-meta (fn [_]
+                                    {:timestamp 101 :completed-at-ms 101000 :status :ok})
+                  cache/invalidate! (fn [_] nil)
+                  cache/read-analysis (fn [_ _] {:fresh true})]
+      (is (= {:ok {:fresh true}}
+             (sidecar/await-cache-ready "hive/complete"
+                                        {:timestamp 100 :status :ok}
+                                        100))))))
+
 (deftest refresh-analysis!-propagates-sidecar-unavailable
   (testing "returns the ensure-sidecar-running! error without polling"
     (with-redefs [cache/read-meta (fn [_] {:timestamp 100 :status :ok})
