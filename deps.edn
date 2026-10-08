@@ -7,12 +7,12 @@
         ;; the contract lib rather than on a host namespace is what lets any
         ;; host, hive-mcp or not, mount this jar.
         io.github.hive-agi/hive-addon
-        {:mvn/version "1.1.2"}
+        {:mvn/version "1.1.4"}
 
         ;; hive-dsl — Result monad (railway-oriented error handling),
         ;; rescue/guard, lifecycle protocol
         io.github.hive-agi/hive-dsl
-        {:mvn/version "0.5.34"}
+        {:mvn/version "0.5.36"}
 
         ;; hive-di — declarative, typed, ADT-backed config resolution
         ;; (defconfig + env/literal sources; replaces ad-hoc env parsing)
@@ -22,17 +22,17 @@
         ;; hive-weave — bounded parallel execution primitives
         ;; (bounded-pmap, fork-join, safe-future, deref-safe)
         io.github.hive-agi/hive-weave
-        {:mvn/version "0.4.1"}
+        {:mvn/version "0.4.2"}
 
         ;; hive-system — DIP protocols + sugar for shell, fs, process
         ;; (replaces ad-hoc clojure.java.shell/sh and .getCanonicalPath)
         io.github.hive-agi/hive-system
-        {:mvn/version "0.3.13"}
+        {:mvn/version "0.3.14"}
 
         ;; hive-help — Elm-style diagnostic message builders
         ;; (param coercion + project-level diag for sidecar pre-flight)
         io.github.hive-agi/hive-help
-        {:mvn/version "0.1.5"}
+        {:mvn/version "0.1.6"}
 
         ;; babashka.fs — filesystem sugar (canonicalize, relativize, etc.)
         babashka/fs {:mvn/version "0.5.34"}}
