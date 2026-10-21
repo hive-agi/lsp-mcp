@@ -13,17 +13,18 @@ Clojure LSP analysis addon for hive-mcp. Provides structural code analysis via t
 
 1. **Docker sidecar cache** -- fast reads from pre-analyzed snapshots
 2. **In-process clojure-lsp** -- fallback when cache is unavailable
-3. **Live Emacs LSP bridge** -- real-time, position-aware queries via running clojure-lsp in Emacs
+3. **Live LSP bridge** -- real-time, position-aware queries through whichever bridge a vessel has registered
 
 Registered as an IAddon (`lsp.mcp`). The engine discovers it automatically from the classpath manifest.
+
+lsp-mcp names no vessel. It ships no editor code and starts no editor.
 
 ## Project Structure
 
 ```
 lsp-mcp/
   src/lsp_mcp/
-    bridge.clj          # ILspBridge protocol (DIP abstraction)
-    emacs_bridge.clj     # EmacsBridge -- Emacs backend (optional)
+    bridge.clj          # ILspBridge protocol + the live-bridge registry
     tools.clj            # MCP tool handlers + command dispatch
     init.clj             # IAddon implementation + nil-railway pipeline
     core.clj             # Analysis orchestration
@@ -31,82 +32,31 @@ lsp-mcp/
     analysis.clj         # Extraction helpers (vars, calls, ns-graph)
     kg_bridge.clj        # Knowledge Graph sync bridge
     log.clj              # Logging shim (timbre/stderr)
-  src-cljel/
-    hive_lsp_bridge.cljel  # Elisp source (Clojure syntax)
   resources/
-    elisp/
-      hive-lsp-bridge.el   # Compiled output (checked in)
     META-INF/hive-addons/
       lsp-mcp.edn          # Addon manifest
 ```
 
-## Compiling `.cljel` to `.el`
+## Live bridges
 
-The `src-cljel/` directory contains Elisp source written in Clojure syntax using [clojure-elisp](https://github.com/lages/clojure-elisp). The compiler translates `.cljel` files to standard Emacs Lisp `.el` files.
+A live bridge is any `lsp-mcp.bridge/ILspBridge`. A vessel registers one under its own key:
 
-### One-time compilation
-
-From the lsp-mcp project root:
-
-```bash
-clojure \
-  -Sdeps '{:deps {io.github.lages/clojure-elisp {:local/root "/home/lages/PP/clojure-elisp"}}}' \
-  -M -e '(require (quote [clojure-elisp.core :as clel]))
-         (clel/compile-file "src-cljel/hive_lsp_bridge.cljel"
-                            "resources/elisp/hive-lsp-bridge.el")'
+```clojure
+;; soft-resolved, so the vessel does not compile against lsp-mcp
+((requiring-resolve 'lsp-mcp.bridge/register-bridge!)
+ :my-vessel
+ ((requiring-resolve 'lsp-mcp.bridge/fn-bridge)
+  {:available? (fn [] true)
+   :call       (fn [method & args] ...)}))   ; method: "hover", "definition", ...
 ```
 
-This reads the `.cljel` source, compiles all forms through the clojure-elisp analyzer/emitter, and writes the output `.el` file. The compiled file:
+The tools ask `active-bridge` on every call, so a vessel that starts after lsp-mcp is picked up without a restart. With no bridge registered, the live commands answer `:bridge/unavailable`.
 
-- Starts with `;;; hive-lsp-bridge.el --- -*- lexical-binding: t; -*-`
-- Requires `clojure-elisp-runtime` (must be on Emacs `load-path`)
-- Ends with `(provide 'hive-lsp-bridge)`
+Known bridges:
 
-### Naming conventions
-
-| `.cljel` source | compiled `.el` output | Elisp feature name |
+| Bridge | Lives in | Backend |
 |---|---|---|
-| `hive_lsp_bridge.cljel` | `hive-lsp-bridge.el` | `hive-lsp-bridge` |
-
-The compiler converts underscores to hyphens and derives the feature name from the `(ns ...)` form.
-
-### Function name mapping
-
-| `.cljel` definition | compiled Elisp name |
-|---|---|
-| `(defn status ...)` | `hive-lsp-bridge-status` |
-| `(defn -find-workspace ...)` | `hive-lsp-bridge--find-workspace` |
-| `(defn hover ...)` | `hive-lsp-bridge-hover` |
-
-Public functions get the namespace prefix (`hive-lsp-bridge-`). Private functions (prefixed with `-`) get a double-dash (`hive-lsp-bridge--`).
-
-### Live development with CIDER
-
-For interactive development without recompiling the whole file:
-
-1. Open `hive_lsp_bridge.cljel` in Emacs
-2. `cider-jack-in` to the clojure-elisp project
-3. `M-x cider-cljel-start` to enable the cljel CIDER session
-4. `C-c C-e` on any `defn` form -- compiles to Elisp and evals in Emacs immediately
-5. `M-: (hive-lsp-bridge-status)` to verify the function works
-
-### When to recompile
-
-Recompile and commit the `.el` output after changing any `.cljel` source. The compiled `.el` is checked into version control so that Emacs can load it at runtime without needing the compiler on the classpath.
-
-## Runtime: how the `.el` gets loaded
-
-The compiled `.el` is loaded **on-the-fly** by the Clojure bridge, not by user Emacs config. The sequence:
-
-1. MCP tool call arrives (e.g. `lsp command=emacs-hover`)
-2. `emacs_bridge.clj` injects `resources/elisp/` into Emacs `load-path` (once)
-3. `require-and-call-json` generates: `(progn (require 'hive-lsp-bridge nil t) (json-encode (hive-lsp-bridge-hover ...)))`
-4. `eval-elisp-with-timeout` sends it to Emacs via `emacsclient --eval`
-5. Emacs loads the feature, calls the function, returns JSON
-
-Prerequisites:
-- `clojure-elisp-runtime` must be on Emacs `load-path` (from the clojure-elisp project)
-- Emacs daemon running with `lsp-mode` and `clojure-lsp` active
+| `:emacs` | hive-emacs (`hive-emacs.lsp-bridge`, `elisp/hive-lsp-bridge.el`) | lsp-mode + clojure-lsp in a running Emacs |
 
 ## MCP Commands
 
@@ -123,18 +73,18 @@ Prerequisites:
 | `sync` | Sync analysis to Knowledge Graph |
 | `status` | Cache and bridge status |
 
-### Live Emacs LSP bridge (strategy 3)
+### Live LSP bridge (strategy 3)
 
 | Command | Parameters | Description |
 |---|---|---|
-| `emacs-status` | -- | Check bridge availability and workspace count |
-| `emacs-workspaces` | -- | List active LSP workspaces |
-| `emacs-hover` | `project_root`, `file_path`, `line`, `column` | Hover info at position |
-| `emacs-definition` | `project_root`, `file_path`, `line`, `column` | Go-to-definition |
-| `emacs-references` | `project_root`, `file_path`, `line`, `column` | Find all references |
-| `emacs-symbols` | `project_root`, `file_path` | Document symbols |
-| `emacs-cursor-info` | `project_root`, `file_path`, `line`, `column` | clojure-lsp cursor info |
-| `emacs-server-info` | `project_root` | clojure-lsp server info |
+| `bridge-status` | -- | Check bridge availability and workspace count |
+| `workspaces` | -- | List active LSP workspaces |
+| `hover` | `project_root`, `file_path`, `line`, `column` | Hover info at position |
+| `definition` | `project_root`, `file_path`, `line`, `column` | Go-to-definition |
+| `live-references` | `project_root`, `file_path`, `line`, `column` | Find all references |
+| `symbols` | `project_root`, `file_path` | Document symbols |
+| `cursor-info` | `project_root`, `file_path`, `line`, `column` | clojure-lsp cursor info |
+| `server-info` | `project_root` | clojure-lsp server info |
 
 `line` and `column` are 0-based.
 
@@ -146,18 +96,12 @@ MCP tool call
        |
        +-- Static: core.clj -> cache.clj / clojure-lsp.api
        |
-       +-- Live:   ILspBridge protocol
+       +-- Live:   bridge/active-bridge -> ILspBridge
                      |
-                     +-- EmacsBridge (emacs_bridge.clj)
-                           |
-                           +-- emacsclient --eval
-                                 |
-                                 +-- (require 'hive-lsp-bridge)  [compiled .el]
-                                       |
-                                       +-- lsp-request -> clojure-lsp in Emacs
+                     +-- whatever a vessel registered (e.g. hive-emacs :emacs)
 ```
 
-The `ILspBridge` protocol (DIP) decouples `tools.clj` from any specific LSP backend. `EmacsBridge` is one implementation; a future `StdioBridge` could talk to clojure-lsp directly over stdio.
+The `ILspBridge` protocol (DIP) decouples `tools.clj` from any LSP backend; the registry decouples lsp-mcp from any vessel.
 
 ## License
 
