@@ -41,6 +41,50 @@
 "
                    (slurp (io/file directory "_request.edn"))))))))))
 
+(deftest coalescible-job-joins-only-live-in-flight-jobs
+  (let [now 1000000 max-age 300000
+        job (fn [m] (merge {:job-id "j1" :project-id "hive/demo"} m))]
+    (testing ":queued and :running jobs are joined, marked :coalesced"
+      (is (= {:job-id "j1" :project-id "hive/demo" :status :queued
+              :queued-at-ms now :coalesced true :requested true}
+             (sidecar/coalescible-job (job {:status :queued :queued-at-ms now}) now max-age)))
+      (is (:coalesced (sidecar/coalescible-job
+                       (job {:status :running :queued-at-ms 1 :started-at-ms (- now 10)})
+                       now max-age))
+          "a running job's age is measured from its start, not its queueing"))
+    (testing "terminal jobs are never joined"
+      (doseq [s [:ok :error :cancelled]]
+        (is (nil? (sidecar/coalescible-job (job {:status s :queued-at-ms now}) now max-age)))))
+    (testing "an in-flight job older than the timeout (dead worker) is not joined"
+      (is (nil? (sidecar/coalescible-job
+                 (job {:status :running :started-at-ms (- now max-age 1)}) now max-age))))
+    (testing "no job, or a job without id/timestamp, is not joined"
+      (is (nil? (sidecar/coalescible-job nil now max-age)))
+      (is (nil? (sidecar/coalescible-job {:status :queued :queued-at-ms now} now max-age)))
+      (is (nil? (sidecar/coalescible-job (job {:status :queued}) now max-age))))))
+
+(deftest request-analysis!-coalesces-onto-in-flight-job
+  (testing "a request while the project's job is :running returns that job and enqueues nothing"
+    (with-temp-cache
+      (fn [directory]
+        (let [project-id  "hive/demo"
+              project-dir (io/file directory project-id)
+              running     {:job-id "job-running"
+                           :project-id project-id
+                           :status :running
+                           :queued-at-ms (System/currentTimeMillis)
+                           :started-at-ms (System/currentTimeMillis)}]
+          (.mkdirs project-dir)
+          (spit (io/file project-dir "job.edn") (pr-str running))
+          (let [request (sidecar/request-analysis! project-id)]
+            (is (true? (:coalesced request)))
+            (is (= "job-running" (:job-id request)))
+            (is (= :running (:status request)))
+            (is (= "job-running" (:job-id (cache/read-job project-id)))
+                "the running worker's job-id is not superseded")
+            (is (not (.exists (io/file directory "_request.edn")))
+                "nothing is appended to the sidecar queue")))))))
+
 (deftest cancel-analysis!-marks-and-signals-running-job
   (testing "cancellation is durable and signals the exact worker process"
     (with-temp-cache
