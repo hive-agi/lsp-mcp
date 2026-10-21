@@ -204,37 +204,66 @@
 (defonce ^:private request-lock
   (Object.))
 
+(defn coalescible-job
+  "The in-flight job a new request for the same project should JOIN, or nil.
+
+   A job that is :queued or :running already covers the request: enqueuing
+   another one writes a fresh job-id over it, so the running worker's result
+   is discarded as superseded and every caller waits on a dump that has not
+   started yet (dog-piling). A job older than `max-age-ms` (worker died, job
+   file left behind) is not joined, so a dead job can never wedge requests.
+
+   Pure: `job` is the persisted job map, `now-ms` the caller's clock."
+  [job now-ms max-age-ms]
+  (when (and (map? job)
+             (#{:queued :running} (:status job))
+             (:job-id job)
+             (let [t (or (:started-at-ms job) (:queued-at-ms job))]
+               (and (number? t) (<= (- now-ms t) max-age-ms))))
+    (assoc job :coalesced true :requested true)))
+
 (defn request-analysis!
-  "Queue a sidecar analysis and persist its observable lifecycle."
+  "Queue a sidecar analysis and persist its observable lifecycle.
+
+   Coalesces: when the project's current job is :queued or :running (and not
+   older than the analysis timeout), that job is returned with :coalesced true
+   and nothing new is enqueued (see `coalescible-job`)."
   [project-id]
   (try
-    (let [request-file (io/file (request-file-path))
-          job-id       (str (java.util.UUID/randomUUID))
-          queued-at-ms (System/currentTimeMillis)
-          job           {:job-id job-id
-                         :project-id project-id
-                         :status :queued
-                         :queued-at-ms queued-at-ms}]
-      (.mkdirs (.getParentFile request-file))
-      (java.nio.file.Files/deleteIfExists
-       (.toPath (io/file (cancel-file-path project-id))))
-      (atomic-write-edn! (job-file-path project-id) job)
-      (locking request-lock
-        (spit request-file (str project-id "\n") :append true))
-      (log/info "Queued sidecar job" job-id "for" project-id)
-      (let [result (sh/exec! ["docker" "exec" sidecar-container
-                              "kill" "-HUP" "1"])
-            {:keys [exit stderr]} (:ok result)
-            response (assoc job :requested true)]
-        (if (and (r/ok? result) (zero? (or exit -1)))
-          (do
-            (log/info "Sent SIGHUP to sidecar")
-            response)
-          (do
-            (log/warn "SIGHUP failed (sidecar will poll the queue):"
-                      (or stderr (:err result)))
-            (assoc response
-                   :warning "SIGHUP failed, sidecar will process on next cycle")))))
+    (if-let [in-flight (locking request-lock
+                         (coalescible-job (cache/read-job project-id)
+                                          (System/currentTimeMillis)
+                                          default-timeout-ms))]
+      (do (log/info "Coalesced sidecar request for" project-id
+                    "onto in-flight job" (:job-id in-flight) (:status in-flight))
+          in-flight)
+      (let [request-file (io/file (request-file-path))
+            job-id       (str (java.util.UUID/randomUUID))
+            queued-at-ms (System/currentTimeMillis)
+            job           {:job-id job-id
+                           :project-id project-id
+                           :status :queued
+                           :queued-at-ms queued-at-ms}]
+        (.mkdirs (.getParentFile request-file))
+        (java.nio.file.Files/deleteIfExists
+         (.toPath (io/file (cancel-file-path project-id))))
+        (atomic-write-edn! (job-file-path project-id) job)
+        (locking request-lock
+          (spit request-file (str project-id "\n") :append true))
+        (log/info "Queued sidecar job" job-id "for" project-id)
+        (let [result (sh/exec! ["docker" "exec" sidecar-container
+                                "kill" "-HUP" "1"])
+              {:keys [exit stderr]} (:ok result)
+              response (assoc job :requested true)]
+          (if (and (r/ok? result) (zero? (or exit -1)))
+            (do
+              (log/info "Sent SIGHUP to sidecar")
+              response)
+            (do
+              (log/warn "SIGHUP failed (sidecar will poll the queue):"
+                        (or stderr (:err result)))
+              (assoc response
+                     :warning "SIGHUP failed, sidecar will process on next cycle"))))))
     (catch Exception e
       (log/error "Failed to request sidecar analysis:" (ex-message e))
       {:error (str "sidecar request failed: " (ex-message e))})))
