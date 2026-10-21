@@ -4,7 +4,7 @@
    Three strategies:
    1. Docker sidecar cache (via lsp-mcp.cache) — fast reads
    2. In-process clojure-lsp — fallback when cache unavailable
-   3. Live Emacs LSP bridge (via lsp-mcp.emacs-bridge) — real-time queries
+   3. Live LSP bridge (any vessel registered in lsp-mcp.bridge) — real-time queries
 
    Railway-oriented: handlers chain Result-returning steps via let-ok.
    Errors short-circuit and surface as MCP error responses.
@@ -58,27 +58,18 @@
   (reset! analysis-cache nil))
 
 ;; =============================================================================
-;; Bridge Resolution (lazy — Emacs backend is optional)
+;; Bridge Resolution (registered by vessels, asked per call)
 ;; =============================================================================
 
-(defonce ^:private bridge-instance
-  (delay
-    (try
-      (when-let [make-fn (requiring-resolve 'lsp-mcp.emacs-bridge/make-emacs-bridge)]
-        (let [b (make-fn)]
-          (when (bridge/bridge-available? b)
-            (log/info "Emacs LSP bridge available")
-            b)))
-      (catch Exception e
-        (log/debug "Emacs bridge not available:" (.getMessage e))
-        nil))))
-
 (defn- resolve-bridge
-  "Get the active ILspBridge instance, or return err Result."
+  "The registered live bridge that is available now, or an err Result.
+   Asked on every call, so a vessel that registers later is picked up."
   []
-  (if-let [b @bridge-instance]
+  (if-let [b (bridge/active-bridge)]
     (ok b)
-    (err :bridge/unavailable {:message "Emacs LSP bridge not available"})))
+    (err :bridge/unavailable
+         {:message    "no live LSP bridge is available; a vessel registers one through lsp-mcp.bridge/register-bridge!"
+          :registered (vec (keys (bridge/registered-bridges)))})))
 
 ;; =============================================================================
 ;; Helpers
